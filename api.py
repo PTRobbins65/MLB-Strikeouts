@@ -240,18 +240,21 @@ def _run_pipeline_background(target_date: str):
         logger.info(f"Background pipeline refresh starting for {target_date}")
         result = subprocess.run(
             [sys.executable, "pipeline.py", "--date", target_date, "--no-wait"],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,   # merge stderr → stdout so we get everything
             text=True,
             timeout=600,  # 10-minute ceiling
             cwd=Path(__file__).parent,
             env={**os.environ, "PYTHONUTF8": "1"},
         )
+        # Forward all pipeline output to Railway log stream
+        if result.stdout:
+            for line in result.stdout.splitlines():
+                logger.info(f"[pipeline] {line}")
         if result.returncode == 0:
             logger.info(f"Pipeline refresh complete for {target_date}")
         else:
-            logger.error(
-                f"Pipeline refresh failed for {target_date}: {result.stderr[-500:]}"
-            )
+            logger.error(f"Pipeline refresh FAILED (exit {result.returncode}) for {target_date}")
     except subprocess.TimeoutExpired:
         logger.error("Pipeline refresh timed out after 10 minutes")
     except Exception as exc:
