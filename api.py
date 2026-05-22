@@ -42,6 +42,7 @@ import numpy as np
 import pandas as pd
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from accuracy_tracker import AccuracyTracker
@@ -261,6 +262,12 @@ def _run_pipeline_background(target_date: str):
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    """Redirect bare root URL to the interactive API docs."""
+    return RedirectResponse(url="/docs")
 
 
 @app.get("/health", response_model=HealthResponse, tags=["System"])
