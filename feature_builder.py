@@ -322,7 +322,10 @@ class FeatureBuilder:
             "opp_lineup_contact":    wmean(contact_pcts),
             "opp_lineup_swstr":      wmean(swstr_pcts),
             "opp_lineup_wrc_plus":   wmean(wrc_plus),
-            "opp_lineup_size":       len(batters),
+            # Use actual count when batters are known; NaN when lineup is empty.
+            # Never use 0 — the model was trained on lineups of 8-9 batters and
+            # interprets 0 as "pitcher faces no one", collapsing all predictions.
+            "opp_lineup_size":       len(batters) if batters else np.nan,
         }
 
     def _build_team_level_features(
@@ -348,7 +351,7 @@ class FeatureBuilder:
                 "opp_lineup_contact":  np.nan,
                 "opp_lineup_swstr":    np.nan,
                 "opp_lineup_wrc_plus": np.nan,
-                "opp_lineup_size":     0,
+                "opp_lineup_size":     np.nan,
             }
 
         return {
@@ -357,7 +360,7 @@ class FeatureBuilder:
             "opp_lineup_contact":  team_batters.get("Contact%", pd.Series()).mean(),
             "opp_lineup_swstr":    team_batters.get("SwStr%", pd.Series()).mean(),
             "opp_lineup_wrc_plus": team_batters.get("wRC+", pd.Series()).mean(),
-            "opp_lineup_size":     0,   # 0 = proxy, not confirmed
+            "opp_lineup_size":     np.nan,  # unknown when FanGraphs unavailable
         }
 
     # ── Lookup helpers ─────────────────────────────────────────────────────
