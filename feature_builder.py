@@ -208,25 +208,42 @@ class FeatureBuilder:
 
     # ── Batch builder (training set) ───────────────────────────────────────
 
-    def build_training_set(self, game_log: pd.DataFrame) -> pd.DataFrame:
+    def build_training_set(
+        self,
+        game_log: pd.DataFrame,
+        lineup_lookup: Optional[Dict] = None,
+    ) -> pd.DataFrame:
         """
         Build the full feature matrix for model training.
 
         game_log must have columns:
             game_pk, game_date, pitcher_mlbam, pitcher_hand,
             is_home, park_id, is_night_game,
-            opp_team_id, strikeouts  (target)
+            home_team, away_team, home_team_id, away_team_id,
+            strikeouts  (target)
 
-        Returns a DataFrame with all features + target column.
+        lineup_lookup : optional dict of game_pk → LineupCard built from
+                        historical Statcast data. When provided, real opponent
+                        batters replace the empty synthetic LineupCards,
+                        populating opp_lineup_* features for every training row.
         """
-        rows = []
+        hits   = 0
+        misses = 0
+        rows   = []
+
         for _, g in game_log.iterrows():
-            # For training we create a minimal synthetic LineupCard
-            # (the historical confirmed lineup was the actual lineup)
-            card = self._make_training_lineup_card(g)
+            game_pk = int(g["game_pk"])
+
+            if lineup_lookup and game_pk in lineup_lookup:
+                card = lineup_lookup[game_pk]
+                hits += 1
+            else:
+                card = self._make_training_lineup_card(g)
+                misses += 1
+
             feat = self.build_row(
                 pitcher_mlbam_id = int(g["pitcher_mlbam"]),
-                game_pk          = int(g["game_pk"]),
+                game_pk          = game_pk,
                 game_date        = str(g["game_date"])[:10],
                 lineup_card      = card,
                 pitcher_hand     = str(g.get("pitcher_hand", "R")),
@@ -235,8 +252,14 @@ class FeatureBuilder:
                 is_night_game    = bool(g.get("is_night_game", True)),
             )
             if feat is not None:
-                feat["strikeouts"] = g["strikeouts"]   # attach target
+                feat["strikeouts"] = g["strikeouts"]
                 rows.append(feat)
+
+        if lineup_lookup:
+            logger.info(
+                f"Lineup lookup coverage: {hits:,} hits / {misses:,} misses "
+                f"({100 * hits / max(hits + misses, 1):.1f}% of training rows have real lineups)"
+            )
 
         df = pd.DataFrame(rows)
         logger.info(f"Training set: {len(df):,} rows, {len(df.columns)} features")

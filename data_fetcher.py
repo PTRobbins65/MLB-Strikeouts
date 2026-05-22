@@ -13,7 +13,7 @@ Usage:
 import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -202,6 +202,105 @@ class HistoricalDataFetcher:
         pb = _pybaseball()
         result = pb.playerid_lookup(last, first)
         return result
+
+    # ── Historical lineup reconstruction from Statcast ────────────────────
+
+    def build_lineup_lookup(
+        self,
+        pitch_df: pd.DataFrame,
+        game_meta: Optional[pd.DataFrame] = None,
+    ) -> Dict[int, object]:
+        """
+        Build a game_pk → LineupCard dict from pitch-level Statcast data.
+        Reconstructs batting orders from the batter + at_bat_number columns
+        with no additional API calls.
+
+        Parameters
+        ----------
+        pitch_df  : full Statcast pitch DataFrame (must contain batter,
+                    at_bat_number, inning_topbot, game_pk, game_date)
+        game_meta : optional DataFrame with game_pk, game_date, home_team,
+                    away_team, home_team_id, away_team_id (from game_log)
+        """
+        from lineup_manager import BatterSlot, LineupCard
+
+        required = {"game_pk", "batter", "at_bat_number", "inning_topbot", "game_date"}
+        missing  = required - set(pitch_df.columns)
+        if missing:
+            logger.warning(
+                f"build_lineup_lookup: columns {missing} not in Statcast data. "
+                "Re-fetch with --refresh to pull the updated column set."
+            )
+            return {}
+
+        # Index schedule metadata by game_pk for fast lookup
+        meta_index: Dict[int, dict] = {}
+        if game_meta is not None and not game_meta.empty:
+            for _, row in game_meta.iterrows():
+                meta_index[int(row["game_pk"])] = row.to_dict()
+
+        lookup: Dict[int, LineupCard] = {}
+
+        for game_pk, game_pitches in pitch_df.groupby("game_pk"):
+            game_pk = int(game_pk)
+            meta    = meta_index.get(game_pk, {})
+
+            # "Top" = away team batting (home pitcher on mound)
+            # "Bot" = home team batting (away pitcher on mound)
+            away_batters = self._extract_batting_order(
+                game_pitches[game_pitches["inning_topbot"] == "Top"]
+            )
+            home_batters = self._extract_batting_order(
+                game_pitches[game_pitches["inning_topbot"] == "Bot"]
+            )
+
+            lookup[game_pk] = LineupCard(
+                game_pk      = game_pk,
+                game_date    = str(game_pitches["game_date"].iloc[0])[:10],
+                home_team    = str(meta.get("home_team", "")),
+                away_team    = str(meta.get("away_team", "")),
+                home_team_id = int(meta.get("home_team_id", 0)),
+                away_team_id = int(meta.get("away_team_id", 0)),
+                home_batters = home_batters,
+                away_batters = away_batters,
+                confirmed    = True,
+            )
+
+        logger.info(
+            f"Lineup lookup built: {len(lookup):,} games, "
+            f"avg {sum(len(c.home_batters) for c in lookup.values()) / max(len(lookup), 1):.1f} "
+            f"home batters per game"
+        )
+        return lookup
+
+    @staticmethod
+    def _extract_batting_order(half_pitches: pd.DataFrame, max_batters: int = 9) -> list:
+        """
+        Return BatterSlot list ordered by first at_bat_number appearance.
+        Works for one half-inning side (all Top or all Bot pitches for a game).
+        """
+        from lineup_manager import BatterSlot
+
+        if half_pitches.empty or "at_bat_number" not in half_pitches.columns:
+            return []
+
+        first_ab = (
+            half_pitches.groupby("batter")["at_bat_number"]
+            .min()
+            .sort_values()
+            .head(max_batters)
+            .reset_index()
+        )
+
+        return [
+            BatterSlot(
+                batting_order = slot + 1,
+                player_id     = int(row["batter"]),
+                full_name     = "Unknown",   # name not needed for feature building
+                position      = "?",
+            )
+            for slot, (_, row) in enumerate(first_ab.iterrows())
+        ]
 
     # ── Computed per-start metrics from Statcast ───────────────────────────
 

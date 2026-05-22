@@ -99,8 +99,18 @@ class ModelTrainer:
             statcast_starts = statcast_starts,
         )
 
+        # Build historical lineup lookup from Statcast so training rows have
+        # real opponent batters rather than empty synthetic LineupCards.
+        logger.info("Building historical lineup lookup from Statcast data...")
+        game_meta = (
+            game_log[["game_pk", "game_date", "home_team", "away_team",
+                       "home_team_id", "away_team_id"]]
+            .drop_duplicates("game_pk")
+        )
+        lineup_lookup = self.fetcher.build_lineup_lookup(pitches, game_meta=game_meta)
+
         logger.info(f"Building feature matrix for {len(game_log):,} pitcher-starts...")
-        features_df = builder.build_training_set(game_log)
+        features_df = builder.build_training_set(game_log, lineup_lookup=lineup_lookup)
         logger.info(
             f"Feature matrix: {len(features_df):,} rows × {len(features_df.columns)} cols"
         )

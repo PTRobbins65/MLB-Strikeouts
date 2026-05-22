@@ -52,6 +52,8 @@ SEASON_START_YEAR = 2015            # first year Statcast data is reliable
 STATCAST_PITCHER_COLS = [
     "game_pk",                               # MLB game ID — used for joining schedule data
     "game_date", "pitcher", "player_name",
+    "batter",                                # opposing batter MLBAM ID
+    "at_bat_number",                         # sequential AB count — used to reconstruct batting order
     "release_speed", "release_spin_rate",
     "pfx_x", "pfx_z",                        # horizontal / vertical movement
     "release_pos_x", "release_pos_z",         # release point
