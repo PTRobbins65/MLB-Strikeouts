@@ -67,7 +67,7 @@ class DailyPipeline:
     def __init__(
         self,
         target_date: Optional[date] = None,
-        history_years: int = 3,
+        history_years: int = 1,
     ):
         self.target_date   = target_date or date.today()
         self.history_years = history_years

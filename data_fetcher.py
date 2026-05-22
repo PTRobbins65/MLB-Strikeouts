@@ -73,7 +73,26 @@ class HistoricalDataFetcher:
 
         pb = _pybaseball()
         logger.info(f"Fetching Statcast pitches for mlbam_id={mlbam_id} ({start_dt} -> {end_dt})")
-        df = pb.statcast_pitcher(start_dt, end_dt, mlbam_id)
+        try:
+            import signal
+
+            def _timeout_handler(signum, frame):
+                raise TimeoutError(f"Statcast fetch timed out for mlbam_id={mlbam_id}")
+
+            # Per-pitcher 90-second hard limit (pybaseball can hang indefinitely)
+            old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+            signal.alarm(90)
+            try:
+                df = pb.statcast_pitcher(start_dt, end_dt, mlbam_id)
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+        except TimeoutError as exc:
+            logger.warning(str(exc))
+            return pd.DataFrame()
+        except Exception as exc:
+            logger.warning(f"Statcast fetch failed for mlbam_id={mlbam_id}: {exc}")
+            return pd.DataFrame()
 
         if df is None or df.empty:
             logger.warning(f"No Statcast data returned for mlbam_id={mlbam_id}")

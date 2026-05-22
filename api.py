@@ -243,7 +243,7 @@ def _run_pipeline_background(target_date: str):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,   # merge stderr → stdout so we get everything
             text=True,
-            timeout=600,  # 10-minute ceiling
+            timeout=1200,  # 20-minute ceiling
             cwd=Path(__file__).parent,
             env={**os.environ, "PYTHONUTF8": "1"},
         )
