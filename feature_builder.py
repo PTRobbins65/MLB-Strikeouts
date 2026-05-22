@@ -33,6 +33,15 @@ from lineup_manager import BatterSlot, LineupCard
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_int(val, default=0) -> int:
+    """Convert val to int, returning default for None / NaN / non-numeric."""
+    try:
+        return int(val) if val == val else default  # val != val catches float NaN
+    except (TypeError, ValueError):
+        return default
+
+
 # Lazy import: IdMapper may not be built on first run
 try:
     from id_mapper import IdMapper as _IdMapper
@@ -248,7 +257,7 @@ class FeatureBuilder:
                 lineup_card      = card,
                 pitcher_hand     = str(g.get("pitcher_hand", "R")),
                 is_home          = bool(g.get("is_home", True)),
-                park_id          = int(g.get("park_id", 680)),
+                park_id          = _safe_int(g.get("park_id"), default=680),
                 is_night_game    = bool(g.get("is_night_game", True)),
             )
             if feat is not None:

@@ -140,7 +140,14 @@ class HistoricalDataFetcher:
 
         pb = _pybaseball()
         logger.info(f"Fetching FanGraphs pitching stats {start_season}–{end_season}")
-        df = pb.pitching_stats(start_season, end_season, qual=min_ip)
+        try:
+            df = pb.pitching_stats(start_season, end_season, qual=min_ip)
+        except Exception as exc:
+            logger.warning(
+                f"FanGraphs pitching stats unavailable ({exc}). "
+                "Season-level FanGraphs features will be missing."
+            )
+            return pd.DataFrame()
 
         if df is None or df.empty:
             return pd.DataFrame()
@@ -170,7 +177,14 @@ class HistoricalDataFetcher:
 
         pb = _pybaseball()
         logger.info(f"Fetching FanGraphs batting stats {start_season}–{end_season}")
-        df = pb.batting_stats(start_season, end_season, qual=min_pa)
+        try:
+            df = pb.batting_stats(start_season, end_season, qual=min_pa)
+        except Exception as exc:
+            logger.warning(
+                f"FanGraphs batting stats unavailable ({exc}). "
+                "Opponent lineup FanGraphs features will be missing."
+            )
+            return pd.DataFrame()
 
         if df is None or df.empty:
             return pd.DataFrame()
@@ -254,13 +268,19 @@ class HistoricalDataFetcher:
                 game_pitches[game_pitches["inning_topbot"] == "Bot"]
             )
 
+            def _safe_int(val, default=0):
+                try:
+                    return int(val) if val == val else default  # val != val is True for NaN
+                except (TypeError, ValueError):
+                    return default
+
             lookup[game_pk] = LineupCard(
                 game_pk      = game_pk,
                 game_date    = str(game_pitches["game_date"].iloc[0])[:10],
-                home_team    = str(meta.get("home_team", "")),
-                away_team    = str(meta.get("away_team", "")),
-                home_team_id = int(meta.get("home_team_id", 0)),
-                away_team_id = int(meta.get("away_team_id", 0)),
+                home_team    = str(meta.get("home_team", "") or ""),
+                away_team    = str(meta.get("away_team", "") or ""),
+                home_team_id = _safe_int(meta.get("home_team_id", 0)),
+                away_team_id = _safe_int(meta.get("away_team_id", 0)),
                 home_batters = home_batters,
                 away_batters = away_batters,
                 confirmed    = True,

@@ -123,7 +123,10 @@ class GameLogBuilder:
         schedule = self._fetch_season_schedule(year)
 
         if not schedule.empty and "game_pk" in starts.columns:
-            starts = starts.merge(schedule, on="game_pk", how="left")
+            # Drop game_date from schedule before merging — starts already has it
+            # from Statcast data; keeping both creates game_date_x / game_date_y.
+            sched_cols = [c for c in schedule.columns if c != "game_date"]
+            starts = starts.merge(schedule[sched_cols], on="game_pk", how="left")
         elif not schedule.empty:
             # Fall back to date-based join if game_pk not in Statcast output
             starts = starts.merge(schedule, on="game_date", how="left")

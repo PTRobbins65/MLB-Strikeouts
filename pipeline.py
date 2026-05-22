@@ -36,6 +36,7 @@ import numpy as np
 import pandas as pd
 
 from config import DATA_DIR, FEATURES_DIR, LOG_DIR, MODEL_DIR, ROLLING_WINDOWS
+from accuracy_tracker import AccuracyTracker
 from data_fetcher import HistoricalDataFetcher
 from feature_builder import FeatureBuilder
 from lineup_manager import LineupManager
@@ -293,27 +294,46 @@ class DailyPipeline:
             logger.info(f"Features saved -> {out_path}")
 
         # 8. Predictions (if a trained model exists)
-        features_df = self._add_predictions(features_df)
+        features_df, model_version = self._add_predictions(features_df)
+
+        # 9. Accuracy tracking
+        if not features_df.empty and "predicted_k" in features_df.columns:
+            tracker = AccuracyTracker()
+            tracker.log_predictions(features_df, model_version=model_version)
+
+            # If we're running for a past date, try to fill in actuals immediately
+            # (Statcast data is typically available within ~2 hours of game end)
+            if self.target_date < date.today():
+                logger.info(f"Past date detected — recording actuals for {self.target_date}")
+                tracker.record_actuals(str(self.target_date))
 
         return features_df
 
-    def _add_predictions(self, features_df: pd.DataFrame) -> pd.DataFrame:
-        """Load the saved model and append a predicted_k column."""
+    def _add_predictions(self, features_df: pd.DataFrame) -> tuple:
+        """
+        Load the saved model and append a predicted_k column.
+        Returns (features_df, model_version_str).
+        """
         if features_df.empty:
-            return features_df
+            return features_df, ""
 
         xgb_path = MODEL_DIR / "strikeout_xgb.json"
         glm_path  = MODEL_DIR / "strikeout_glm.joblib"
 
-        model = None
-        model_name = ""
+        model        = None
+        model_name   = ""
+        model_version = ""
 
         if xgb_path.exists():
             try:
                 import xgboost as xgb
                 model = xgb.XGBRegressor()
                 model.load_model(str(xgb_path))
-                model_name = "XGBoost"
+                model_name    = "XGBoost"
+                # Version = file modification date (YYYYMMDD)
+                model_version = datetime.fromtimestamp(
+                    xgb_path.stat().st_mtime
+                ).strftime("%Y%m%d")
             except Exception as exc:
                 logger.warning(f"Could not load XGBoost model: {exc}")
 
@@ -321,21 +341,25 @@ class DailyPipeline:
             try:
                 import joblib
                 model = joblib.load(glm_path)
-                model_name = "Poisson GLM"
+                model_name    = "Poisson GLM"
+                model_version = datetime.fromtimestamp(
+                    glm_path.stat().st_mtime
+                ).strftime("%Y%m%d")
             except Exception as exc:
                 logger.warning(f"Could not load Poisson GLM: {exc}")
 
         if model is None:
             logger.info("No trained model found — skipping predictions (run model_trainer.py first)")
-            return features_df
+            return features_df, ""
 
         avail = [c for c in FEATURE_COLS if c in features_df.columns]
         X = features_df[avail].copy()
         preds = np.clip(model.predict(X), 0, None)
         features_df = features_df.copy()
-        features_df["predicted_k"] = preds.round(1)
-        logger.info(f"Predictions added using {model_name}")
-        return features_df
+        features_df["predicted_k"]   = preds.round(1)
+        features_df["model_version"] = model_version
+        logger.info(f"Predictions added using {model_name} (version {model_version})")
+        return features_df, model_version
 
     def _wait_for_confirmations(self, games: List[dict], max_wait_minutes: int = 240):
         """
@@ -372,15 +396,54 @@ class DailyPipeline:
 
 def parse_args():
     p = argparse.ArgumentParser(description="MLB Strikeout Prediction Pipeline")
-    p.add_argument("--date",       type=str, help="YYYY-MM-DD  (default: today)")
-    p.add_argument("--no-wait",    action="store_true", help="Skip lineup polling wait")
-    p.add_argument("--history",    type=int, default=3, help="Years of historical data")
-    p.add_argument("--show",       action="store_true", help="Print feature table to stdout")
+    p.add_argument("--date",           type=str, help="YYYY-MM-DD  (default: today)")
+    p.add_argument("--no-wait",        action="store_true", help="Skip lineup polling wait")
+    p.add_argument("--history",        type=int, default=3, help="Years of historical data")
+    p.add_argument("--show",           action="store_true", help="Print prediction table to stdout")
+    p.add_argument("--record-actuals", type=str, metavar="DATE",
+                   help="Fill actuals in accuracy log for DATE (YYYY-MM-DD) and exit")
+    p.add_argument("--backfill",       type=int, metavar="DAYS",
+                   help="Backfill actuals for the last N days and exit")
+    p.add_argument("--accuracy",       type=int, nargs="?", const=30, metavar="DAYS",
+                   help="Print accuracy summary for last N days (default 30) and exit")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+
+    # ── Accuracy sub-commands (no pipeline run needed) ──────────────────────
+    if args.record_actuals:
+        n = AccuracyTracker().record_actuals(args.record_actuals)
+        print(f"Updated {n} rows for {args.record_actuals}")
+        sys.exit(0)
+
+    if args.backfill:
+        from accuracy_tracker import backfill_actuals
+        backfill_actuals(args.backfill)
+        sys.exit(0)
+
+    if args.accuracy is not None:
+        s = AccuracyTracker().get_summary(window_days=args.accuracy)
+        label = f"last {args.accuracy} days" if args.accuracy else "all-time"
+        print(f"\n=== Strikeout Model Accuracy ({label}) ===")
+        print(f"  Predictions logged : {s['n_predictions']}")
+        print(f"  Games graded       : {s['n_graded']}")
+        if s["mae"] is not None:
+            print(f"  MAE                : {s['mae']:.3f} K")
+            print(f"  RMSE               : {s['rmse']:.3f} K")
+            print(f"  Bias               : {s['bias']:+.3f} K  ({'over' if s['bias'] > 0 else 'under'}-predicting)")
+            print(f"  Within 1 K         : {s['within_1_k']*100:.1f}%")
+            print(f"  Within 2 K         : {s['within_2_k']*100:.1f}%")
+            if s["mae_confirmed"] is not None:
+                print(f"  MAE (confirmed)    : {s['mae_confirmed']:.3f} K")
+            if s["mae_projected"] is not None:
+                print(f"  MAE (projected)    : {s['mae_projected']:.3f} K")
+        else:
+            print("  (no graded predictions yet — run pipeline for past dates to populate)")
+        sys.exit(0)
+
+    # ── Normal pipeline run ─────────────────────────────────────────────────
     run_date = date.fromisoformat(args.date) if args.date else date.today()
 
     pipeline = DailyPipeline(target_date=run_date, history_years=args.history)
@@ -389,7 +452,7 @@ if __name__ == "__main__":
     if args.show and not features.empty:
         pd.set_option("display.max_columns", 12)
         pd.set_option("display.width", 140)
-        print("\n── Today's Strikeout Predictions ──")
+        print("\n-- Today's Strikeout Predictions --")
         show_cols = [c for c in [
             "pitcher_name", "home_team", "away_team",
             "k_rolling_5", "whiff_pct_5", "opp_lineup_k_pct",

@@ -169,6 +169,13 @@ class ModelTrainer:
         X = features_df[avail].copy()
         y = features_df[TARGET_COL].copy()
 
+        # Force all feature columns to numeric — object dtype (e.g. avg_velo columns
+        # that contain NaN objects instead of float NaN) will crash XGBoost.
+        for col in X.columns:
+            if X[col].dtype == object:
+                X[col] = pd.to_numeric(X[col], errors="coerce")
+        logger.info(f"Feature dtypes after coercion: {X.dtypes.value_counts().to_dict()}")
+
         # Sort chronologically to prevent leakage in TimeSeriesSplit
         if "game_date" in features_df.columns:
             order = pd.to_datetime(features_df["game_date"]).argsort()
