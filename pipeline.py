@@ -32,12 +32,14 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
 
+import numpy as np
 import pandas as pd
 
-from config import DATA_DIR, FEATURES_DIR, LOG_DIR, ROLLING_WINDOWS
+from config import DATA_DIR, FEATURES_DIR, LOG_DIR, MODEL_DIR, ROLLING_WINDOWS
 from data_fetcher import HistoricalDataFetcher
 from feature_builder import FeatureBuilder
 from lineup_manager import LineupManager
+from model_trainer import FEATURE_COLS
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -290,6 +292,49 @@ class DailyPipeline:
             features_df.to_parquet(out_path, index=False)
             logger.info(f"Features saved → {out_path}")
 
+        # 8. Predictions (if a trained model exists)
+        features_df = self._add_predictions(features_df)
+
+        return features_df
+
+    def _add_predictions(self, features_df: pd.DataFrame) -> pd.DataFrame:
+        """Load the saved model and append a predicted_k column."""
+        if features_df.empty:
+            return features_df
+
+        xgb_path = MODEL_DIR / "strikeout_xgb.json"
+        glm_path  = MODEL_DIR / "strikeout_glm.joblib"
+
+        model = None
+        model_name = ""
+
+        if xgb_path.exists():
+            try:
+                import xgboost as xgb
+                model = xgb.XGBRegressor()
+                model.load_model(str(xgb_path))
+                model_name = "XGBoost"
+            except Exception as exc:
+                logger.warning(f"Could not load XGBoost model: {exc}")
+
+        if model is None and glm_path.exists():
+            try:
+                import joblib
+                model = joblib.load(glm_path)
+                model_name = "Poisson GLM"
+            except Exception as exc:
+                logger.warning(f"Could not load Poisson GLM: {exc}")
+
+        if model is None:
+            logger.info("No trained model found — skipping predictions (run model_trainer.py first)")
+            return features_df
+
+        avail = [c for c in FEATURE_COLS if c in features_df.columns]
+        X = features_df[avail].copy()
+        preds = np.clip(model.predict(X), 0, None)
+        features_df = features_df.copy()
+        features_df["predicted_k"] = preds.round(1)
+        logger.info(f"Predictions added using {model_name}")
         return features_df
 
     def _wait_for_confirmations(self, games: List[dict], max_wait_minutes: int = 240):
@@ -342,9 +387,12 @@ if __name__ == "__main__":
     features = pipeline.run(wait_for_lineups=not args.no_wait)
 
     if args.show and not features.empty:
-        pd.set_option("display.max_columns", 10)
-        pd.set_option("display.width", 120)
-        print("\n── Feature Preview ──")
-        print(features[["pitcher_name", "home_team", "away_team",
-                         "k_rolling_5", "whiff_pct_5", "opp_lineup_k_pct",
-                         "park_k_factor", "lineup_confirmed"]].to_string(index=False))
+        pd.set_option("display.max_columns", 12)
+        pd.set_option("display.width", 140)
+        print("\n── Today's Strikeout Predictions ──")
+        show_cols = [c for c in [
+            "pitcher_name", "home_team", "away_team",
+            "k_rolling_5", "whiff_pct_5", "opp_lineup_k_pct",
+            "park_k_factor", "lineup_confirmed", "predicted_k",
+        ] if c in features.columns]
+        print(features[show_cols].to_string(index=False))

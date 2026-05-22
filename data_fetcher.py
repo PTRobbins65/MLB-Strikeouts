@@ -230,7 +230,11 @@ class HistoricalDataFetcher:
         df["is_strikeout"]     = df["events"] == "strikeout"
 
         # ── Group by game ─────────────────────────────────────────────────
-        grp = df.groupby(["game_date", "pitcher", "player_name"])
+        # Include game_pk when available for accurate per-game grouping
+        base_keys = ["game_date", "pitcher", "player_name"]
+        group_keys = (["game_pk"] + base_keys) if "game_pk" in df.columns else base_keys
+
+        grp = df.groupby(group_keys)
 
         agg = grp.agg(
             pitches          = ("pitch_type", "count"),
@@ -254,9 +258,21 @@ class HistoricalDataFetcher:
         agg["zone_pct"]    = agg["in_zone_pitches"] / agg["pitches"].clip(lower=1)
         agg["o_swing_pct"] = agg["out_of_zone_swings"] / agg["out_of_zone_pitches"].clip(lower=1)
 
+        # ── is_home: "Top" half = away batting = home team pitching ──────
+        if "inning_topbot" in df.columns:
+            is_home_df = (
+                df.groupby(group_keys)["inning_topbot"]
+                .agg(lambda x: (x == "Top").mean() > 0.5)
+                .reset_index()
+                .rename(columns={"inning_topbot": "is_home"})
+            )
+            agg = agg.merge(is_home_df, on=group_keys, how="left")
+
         # ── Pitch mix (% usage per type) ──────────────────────────────────
+        mix_keys = (["game_pk", "game_date", "pitcher"] if "game_pk" in df.columns
+                    else ["game_date", "pitcher"])
         pitch_mix = (
-            df.groupby(["game_date", "pitcher", "pitch_type"])
+            df.groupby(mix_keys + ["pitch_type"])
               .size()
               .unstack(fill_value=0)
         )
@@ -264,7 +280,7 @@ class HistoricalDataFetcher:
         pitch_mix.columns = [f"pitch_pct_{c}" for c in pitch_mix.columns]
         pitch_mix = pitch_mix.reset_index()
 
-        agg = agg.merge(pitch_mix, on=["game_date", "pitcher"], how="left")
+        agg = agg.merge(pitch_mix, on=mix_keys, how="left")
         agg["game_date"] = pd.to_datetime(agg["game_date"])
         agg = agg.sort_values(["pitcher", "game_date"]).reset_index(drop=True)
 

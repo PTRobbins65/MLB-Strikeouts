@@ -33,6 +33,12 @@ from lineup_manager import BatterSlot, LineupCard
 
 logger = logging.getLogger(__name__)
 
+# Lazy import: IdMapper may not be built on first run
+try:
+    from id_mapper import IdMapper as _IdMapper
+except ImportError:
+    _IdMapper = None
+
 
 # ── Park strikeout factors ──────────────────────────────────────────────────
 # Source: multi-year FanGraphs park factors for K.
@@ -97,6 +103,14 @@ class FeatureBuilder:
         self.fg_batters  = fg_batter_df
         self.starts      = statcast_starts.sort_values(["pitcher", "game_date"]).copy()
         self.umpires     = umpire_k_df
+
+        # ID mapper for MLBAM → FanGraphs IDfg lookups
+        self._id_mapper = None
+        if _IdMapper is not None:
+            try:
+                self._id_mapper = _IdMapper()
+            except Exception as exc:
+                logger.warning(f"IdMapper unavailable — FanGraphs lookups will return None: {exc}")
 
     # ── Main entry point ───────────────────────────────────────────────────
 
@@ -319,27 +333,38 @@ class FeatureBuilder:
     def _get_fg_pitcher(self, mlbam_id: int, season: int) -> Optional[Dict]:
         """
         Return FanGraphs pitcher row for a given season.
-        Falls back to the most recent season if current season not yet available.
-        Note: FanGraphs uses its own IDfg, not MLBAM — this requires the
-              pybaseball playerid_lookup cross-reference. For now we match by
-              approximate name match; replace with a proper ID mapping table.
+        Uses MLBAM → IDfg mapping via IdMapper (Chadwick Bureau register).
+        Falls back to previous season if current season isn't yet available.
         """
-        if self.fg_pitchers.empty:
+        if self.fg_pitchers.empty or self._id_mapper is None:
             return None
 
-        # Prefer current season; fall back to previous
+        fg_id = self._id_mapper.mlbam_to_fg(mlbam_id)
+        if fg_id is None:
+            return None
+
         for yr in [season, season - 1]:
-            subset = self.fg_pitchers[self.fg_pitchers["Season"] == yr]
-            # TODO: replace with a pre-joined MLBAM → IDfg mapping
+            subset = self.fg_pitchers[
+                (self.fg_pitchers["Season"] == yr) &
+                (self.fg_pitchers["IDfg"] == fg_id)
+            ]
             if not subset.empty:
-                return subset.iloc[0].to_dict()   # placeholder until ID mapping
+                return subset.iloc[0].to_dict()
         return None
 
     def _get_fg_batter(self, player_id: int, season: int) -> Optional[Dict]:
-        """Return FanGraphs batter row. Same ID-mapping caveat as above."""
-        if self.fg_batters.empty:
+        """Return FanGraphs batter row matched by MLBAM → IDfg mapping."""
+        if self.fg_batters.empty or self._id_mapper is None:
             return None
-        subset = self.fg_batters[self.fg_batters["Season"] == season]
+
+        fg_id = self._id_mapper.mlbam_to_fg(player_id)
+        if fg_id is None:
+            return None
+
+        subset = self.fg_batters[
+            (self.fg_batters["Season"] == season) &
+            (self.fg_batters["IDfg"] == fg_id)
+        ]
         if not subset.empty:
             return subset.iloc[0].to_dict()
         return None

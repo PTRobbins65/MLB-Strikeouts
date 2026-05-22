@@ -50,6 +50,7 @@ SEASON_START_YEAR = 2015            # first year Statcast data is reliable
 
 # Key Statcast columns we pull for pitchers
 STATCAST_PITCHER_COLS = [
+    "game_pk",                               # MLB game ID — used for joining schedule data
     "game_date", "pitcher", "player_name",
     "release_speed", "release_spin_rate",
     "pfx_x", "pfx_z",                        # horizontal / vertical movement
@@ -65,6 +66,7 @@ STATCAST_PITCHER_COLS = [
     "strikes", "balls",
     "outs_when_up",
     "inning",
+    "inning_topbot",                          # "Top" = home team pitching, "Bot" = away pitching
     "stand",                                  # batter handedness
     "p_throws",                               # pitcher hand
 ]
