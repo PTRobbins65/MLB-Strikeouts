@@ -94,7 +94,8 @@ class LineupManager:
 
     def __init__(self, target_date: Optional[date] = None):
         self.target_date = target_date or date.today()
-        self._cache: Dict[int, LineupCard] = {}       # game_pk -> LineupCard
+        self._cache: Dict[int, LineupCard] = {}              # game_pk -> LineupCard
+        self._projected_cache: Dict[int, List[BatterSlot]] = {}  # team_id -> batters
         self._lock = threading.Lock()
         self._poll_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -199,99 +200,124 @@ class LineupManager:
         team_id: int,
         game_pk: int,
         pitcher_throws: str,
-        n_recent: int = 15,
+        n_recent: int = 10,
     ) -> List[BatterSlot]:
         """
-        Build a projected lineup from a team's recent lineup history.
-        Queries the StatsAPI for the last n_recent completed games and
-        uses the most-frequent batting-order slots to estimate starters.
+        Build a projected 9-batter lineup from a team's recent boxscore history.
+
+        Uses the boxscore endpoint (not schedule hydrate=lineups, which doesn't
+        return completed-game batting orders).  Results are cached per team_id
+        so each team is only fetched once per pipeline run even if they appear
+        in multiple games (doubleheaders).
 
         Parameters
         ----------
-        team_id         : MLB team ID
-        game_pk         : target game (used to filter out future games)
-        pitcher_throws  : "R" or "L" — we match platoon splits
-        n_recent        : number of recent games to sample
+        team_id        : MLB team ID
+        game_pk        : today's game_pk (excluded from history)
+        pitcher_throws : "R" or "L"
+        n_recent       : number of recent completed games to sample
         """
+        # Return cached result if we already built this team's projection today
+        if team_id in self._projected_cache:
+            logger.debug(f"Projected lineup cache hit for team_id={team_id}")
+            return self._projected_cache[team_id]
+
         logger.info(f"Building projected lineup for team_id={team_id} vs {pitcher_throws}HP")
 
-        # Get last n_recent completed games for this team
+        # Step 1: get recent game_pks for this team via schedule (no hydrate needed)
         end_date   = self.target_date.strftime("%Y-%m-%d")
-        start_date = (self.target_date - timedelta(days=45)).strftime("%Y-%m-%d")
+        start_date = (self.target_date - timedelta(days=30)).strftime("%Y-%m-%d")
 
-        data = _mlb_get("schedule", params={
-            "sportId": 1,
-            "teamId": team_id,
-            "startDate": start_date,
-            "endDate": end_date,
-            "hydrate": "lineups,probablePitcher(pitchHand),team",
-            "gameType": "R",           # regular season only
-        })
+        try:
+            sched = _mlb_get("schedule", params={
+                "sportId":   1,
+                "teamId":    team_id,
+                "startDate": start_date,
+                "endDate":   end_date,
+                "gameType":  "R",
+            })
+        except Exception as exc:
+            logger.warning(f"Schedule fetch failed for team_id={team_id}: {exc}")
+            self._projected_cache[team_id] = []
+            return []
 
-        # Collect batting orders from completed games
-        slot_votes: Dict[int, Dict[int, int]] = {}  # player_id -> {slot: count}
-        slot_names: Dict[int, str] = {}
-        slot_pos:   Dict[int, str] = {}
-        games_counted = 0
-
-        for date_entry in reversed(data.get("dates", [])):
-            if games_counted >= n_recent:
-                break
+        # Collect completed game_pks (most recent first)
+        recent_pks: List[tuple] = []   # (game_pk, home_team_id)
+        for date_entry in reversed(sched.get("dates", [])):
             for g in reversed(date_entry.get("games", [])):
-                if games_counted >= n_recent:
-                    break
                 if g.get("status", {}).get("abstractGameState") != "Final":
                     continue
                 if g["gamePk"] == game_pk:
                     continue
-
-                # Check pitcher handedness for this game (for platoon awareness)
-                # (optional refinement — use when historical platoon data matters)
-                lineups = g.get("lineups", {})
                 home_id = g["teams"]["home"]["team"]["id"]
-                away_id = g["teams"]["away"]["team"]["id"]
+                recent_pks.append((g["gamePk"], home_id))
+                if len(recent_pks) >= n_recent:
+                    break
+            if len(recent_pks) >= n_recent:
+                break
 
-                side_key  = "homePlayers" if home_id == team_id else "awayPlayers"
-                batters = lineups.get(side_key, [])
-
-                if not batters:
-                    continue
-
-                games_counted += 1
-                for b in batters:
-                    pid   = b.get("id") or b.get("person", {}).get("id")
-                    name  = b.get("playerName") or b.get("person", {}).get("fullName", "Unknown")
-                    pos   = b.get("primaryPosition", {}).get("abbreviation", "?")
-                    order = b.get("battingOrder")
-                    if pid is None or order is None:
-                        continue
-
-                    slot_votes.setdefault(pid, {})
-                    slot_votes[pid][order] = slot_votes[pid].get(order, 0) + 1
-                    slot_names[pid] = name
-                    slot_pos[pid]   = pos
-
-        if not slot_votes:
-            logger.warning(f"No historical lineup data found for team_id={team_id}")
+        if not recent_pks:
+            logger.warning(f"No recent completed games found for team_id={team_id}")
+            self._projected_cache[team_id] = []
             return []
 
-        # For each slot 1–9, pick the player with the most appearances
+        # Step 2: fetch boxscore for each game and extract batting order
+        slot_votes: Dict[int, Dict[int, int]] = {}   # player_id -> {slot: count}
+        slot_names: Dict[int, str] = {}
+        slot_pos:   Dict[int, str] = {}
+        games_counted = 0
+
+        for pk, home_id in recent_pks:
+            try:
+                boxscore = _mlb_get(f"game/{pk}/boxscore")
+            except Exception as exc:
+                logger.debug(f"Boxscore fetch failed for game_pk={pk}: {exc}")
+                continue
+
+            side      = "home" if home_id == team_id else "away"
+            team_data = boxscore.get("teams", {}).get(side, {})
+            batters   = self._parse_boxscore_lineup(team_data)
+
+            if not batters:
+                continue
+
+            games_counted += 1
+            for b in batters:
+                slot_votes.setdefault(b.player_id, {})
+                slot_votes[b.player_id][b.batting_order] = (
+                    slot_votes[b.player_id].get(b.batting_order, 0) + 1
+                )
+                slot_names[b.player_id] = b.full_name
+                slot_pos[b.player_id]   = b.position
+
+        if not slot_votes:
+            logger.warning(f"No batting order data found for team_id={team_id} "
+                           f"across {len(recent_pks)} games checked")
+            self._projected_cache[team_id] = []
+            return []
+
+        # Step 3: for each slot 1–9 pick the player with the most appearances
         slot_to_player: Dict[int, BatterSlot] = {}
         for pid, votes in slot_votes.items():
             best_slot = max(votes, key=votes.get)
             count     = votes[best_slot]
-            if best_slot not in slot_to_player or count > slot_to_player[best_slot].k_pct:
-                # Re-use k_pct field temporarily to store the vote count
+            existing  = slot_to_player.get(best_slot)
+            if existing is None or count > (existing.k_pct or 0):
                 slot_to_player[best_slot] = BatterSlot(
-                    batting_order=best_slot,
-                    player_id=pid,
-                    full_name=slot_names[pid],
-                    position=slot_pos[pid],
-                    k_pct=count,            # vote count — overwritten later by FeatureBuilder
+                    batting_order = best_slot,
+                    player_id     = pid,
+                    full_name     = slot_names[pid],
+                    position      = slot_pos[pid],
+                    k_pct         = count,   # vote count; overwritten by FeatureBuilder
                 )
 
         projected = sorted(slot_to_player.values(), key=lambda b: b.batting_order)
-        logger.info(f"Projected {len(projected)} batters for team_id={team_id}")
+        logger.info(
+            f"Projected {len(projected)} batters for team_id={team_id} "
+            f"from {games_counted} recent games"
+        )
+
+        self._projected_cache[team_id] = projected
         return projected
 
     # ── Polling loop ──────────────────────────────────────────────────────
