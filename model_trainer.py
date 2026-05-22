@@ -26,7 +26,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 
-from config import FEATURES_DIR, LOG_DIR, MODEL_DIR
+from config import FEATURES_DIR, LOG_DIR, MODEL_DIR, PROCESSED_DIR
 from data_fetcher import HistoricalDataFetcher
 from feature_builder import FeatureBuilder
 from game_log_builder import GameLogBuilder
@@ -91,12 +91,31 @@ class ModelTrainer:
         pitches = self.fetcher.get_statcast_date_range(start_dt, end_dt)
         if pitches.empty:
             raise RuntimeError("No Statcast data available for the training window")
-        statcast_starts = self.fetcher.compute_per_start_metrics(pitches)
+        statcast_starts  = self.fetcher.compute_per_start_metrics(pitches)
+
+        # Compute Statcast-derived pitcher and batter season stats from the same
+        # league-wide data (FanGraphs is blocked; these replace it cleanly).
+        logger.info("Computing Statcast pitcher season stats...")
+        statcast_season  = self.fetcher.compute_pitcher_season_stats(pitches)
+        logger.info("Computing Statcast batter season stats...")
+        sc_batter_stats  = self.fetcher.compute_batter_season_stats(pitches)
+
+        # Persist batter stats so the daily pipeline can load them without
+        # re-downloading or re-computing league-wide Statcast.
+        if not sc_batter_stats.empty:
+            batter_cache = PROCESSED_DIR / f"batter_season_{start_year}_{end_year}.parquet"
+            sc_batter_stats.to_parquet(batter_cache, index=False)
+            logger.info(
+                f"Batter season stats saved for pipeline use: "
+                f"{len(sc_batter_stats):,} batter-seasons -> {batter_cache.name}"
+            )
 
         builder = FeatureBuilder(
             fg_pitcher_df   = fg_pitchers,
             fg_batter_df    = fg_batters,
             statcast_starts = statcast_starts,
+            statcast_season = statcast_season,
+            sc_batter_stats = sc_batter_stats,
         )
 
         # Build historical lineup lookup from Statcast so training rows have

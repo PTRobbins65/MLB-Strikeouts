@@ -87,6 +87,20 @@ WHIFF_DESCRIPTIONS = {
 # Descriptions that count toward CSW (called strike + whiff)
 CSW_DESCRIPTIONS = WHIFF_DESCRIPTIONS | {"called_strike"}
 
+# All pitch descriptions that represent a batter swing (hit or miss)
+SWING_DESCRIPTIONS = {
+    "swinging_strike",
+    "swinging_strike_blocked",
+    "missed_bunt",
+    "foul_tip",
+    "foul",
+    "foul_bunt",
+    "bunt_foul_tip",
+    "hit_into_play",
+    "hit_into_play_no_out",
+    "hit_into_play_score",
+}
+
 # ── FanGraphs Settings ────────────────────────────────────────────────────────
 # pybaseball pitching_stats columns we want to retain
 FANGRAPHS_PITCHER_COLS = [

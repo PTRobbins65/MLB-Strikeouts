@@ -92,6 +92,15 @@ class DailyPipeline:
             f"{len(self.fg_batters):,} batter-seasons"
         )
 
+        # Statcast-derived batter stats — replaces FanGraphs when blocked (403).
+        # Reads from pre-computed cache in data/processed/; builds it on first run
+        # from the league-wide Statcast parquet (already on disk after training).
+        logger.info(f"Loading Statcast batter season stats {start_year}–{current_year}")
+        self.sc_batter_stats = self.fetcher.get_batter_season_stats_cache(
+            start_year, current_year
+        )
+        logger.info(f"Statcast batter stats: {len(self.sc_batter_stats):,} batter-seasons")
+
     # ── Step 2: Fetch today's schedule ────────────────────────────────────
 
     def fetch_schedule(self) -> List[dict]:
@@ -219,6 +228,7 @@ class DailyPipeline:
             fg_batter_df    = self.fg_batters,
             statcast_starts = statcast_starts,
             statcast_season = statcast_season,
+            sc_batter_stats = getattr(self, "sc_batter_stats", None),
         )
 
         feature_rows = []

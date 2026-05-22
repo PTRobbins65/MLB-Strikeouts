@@ -108,6 +108,7 @@ class FeatureBuilder:
         statcast_starts: pd.DataFrame,
         umpire_k_df: Optional[pd.DataFrame] = None,
         statcast_season: Optional[pd.DataFrame] = None,
+        sc_batter_stats: Optional[pd.DataFrame] = None,
     ):
         self.fg_pitchers = fg_pitcher_df
         self.fg_batters  = fg_batter_df
@@ -119,7 +120,7 @@ class FeatureBuilder:
                                                  "o_swing_pct", "avg_velo", "pitches"])
         self.umpires     = umpire_k_df
 
-        # Statcast-derived season stats (replaces FanGraphs when available).
+        # Statcast-derived pitcher season stats (replaces FanGraphs when available).
         # Index by (pitcher MLBAM, season year) for O(1) lookup.
         if statcast_season is not None and not statcast_season.empty:
             self._sc_season_idx = statcast_season.set_index(["pitcher", "season"])
@@ -129,6 +130,17 @@ class FeatureBuilder:
             )
         else:
             self._sc_season_idx = None
+
+        # Statcast-derived batter season stats (replaces FanGraphs batter data).
+        # Index by (batter MLBAM, season year) for O(1) lookup.
+        if sc_batter_stats is not None and not sc_batter_stats.empty:
+            self._sc_batter_idx = sc_batter_stats.set_index(["batter", "season"])
+            logger.info(
+                f"Statcast batter stats loaded: "
+                f"{len(sc_batter_stats):,} batter-seasons available"
+            )
+        else:
+            self._sc_batter_idx = None
 
         # ID mapper for MLBAM -> FanGraphs IDfg lookups (fallback only)
         self._id_mapper = None
@@ -329,18 +341,31 @@ class FeatureBuilder:
         weights     = []
 
         for b in batters:
+            # PA-weighted slot weight (leadoff sees ~15% more PAs than #9)
+            slot_w = 1.0 + max(0, (5 - b.batting_order)) * 0.03
+
+            # Try Statcast-derived batter stats first (always available;
+            # no FanGraphs dependency).  Fall back to FanGraphs if needed.
+            sc = self._get_statcast_batter(b.player_id, season)
+            if sc is not None:
+                k_pcts.append(sc.get("k_pct",       np.nan))
+                o_swing_pcts.append(sc.get("o_swing_pct", np.nan))
+                contact_pcts.append(sc.get("contact_pct", np.nan))
+                swstr_pcts.append(sc.get("swstr_pct",   np.nan))
+                # wRC+ cannot be derived from raw Statcast without park adjustments
+                wrc_plus.append(np.nan)
+                weights.append(slot_w)
+                continue
+
+            # Fallback: FanGraphs (may be blocked)
             fg = self._get_fg_batter(b.player_id, season)
             if fg is None:
                 continue
 
-            # PA-weighted slot weight (leadoff sees ~15% more PAs than #9)
-            slot_w = 1.0 + max(0, (5 - b.batting_order)) * 0.03
-
-            # Optional: filter by platoon side if batter handedness available
-            k_pcts.append(fg.get("K%", np.nan))
-            o_swing_pcts.append(fg.get("O-Swing%", np.nan))
-            contact_pcts.append(fg.get("Contact%", np.nan))
-            swstr_pcts.append(fg.get("SwStr%", np.nan))
+            k_pcts.append(fg.get("K%",        np.nan))
+            o_swing_pcts.append(fg.get("O-Swing%",  np.nan))
+            contact_pcts.append(fg.get("Contact%",  np.nan))
+            swstr_pcts.append(fg.get("SwStr%",    np.nan))
             wrc_plus.append(fg.get("wRC+", 100.0))
             weights.append(slot_w)
 
@@ -414,6 +439,23 @@ class FeatureBuilder:
             try:
                 row = self._sc_season_idx.loc[(mlbam_id, yr)]
                 # loc can return a Series (single match) or DataFrame (multiple)
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[0]
+                return row.to_dict()
+            except KeyError:
+                continue
+        return None
+
+    def _get_statcast_batter(self, batter_mlbam: int, season: int) -> Optional[Dict]:
+        """
+        Return Statcast-derived batter season stats dict.
+        Tries current season first, falls back one year (early-season sparse data).
+        """
+        if self._sc_batter_idx is None:
+            return None
+        for yr in [season, season - 1]:
+            try:
+                row = self._sc_batter_idx.loc[(batter_mlbam, yr)]
                 if isinstance(row, pd.DataFrame):
                     row = row.iloc[0]
                 return row.to_dict()

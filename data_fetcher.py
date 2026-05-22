@@ -20,7 +20,7 @@ import pandas as pd
 from config import (
     RAW_DIR, PROCESSED_DIR,
     STATCAST_PITCHER_COLS, FANGRAPHS_PITCHER_COLS,
-    WHIFF_DESCRIPTIONS, CSW_DESCRIPTIONS,
+    WHIFF_DESCRIPTIONS, CSW_DESCRIPTIONS, SWING_DESCRIPTIONS,
     SEASON_START_YEAR,
 )
 
@@ -559,3 +559,153 @@ class HistoricalDataFetcher:
         agg = agg.sort_values(["pitcher", "game_date"]).reset_index(drop=True)
 
         return agg
+
+    # ── Computed per-batter season stats from Statcast ────────────────────
+
+    def compute_batter_season_stats(self, pitches_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Aggregate pitch-level Statcast data into one row per (batter, season).
+
+        Replaces the blocked FanGraphs batting stats for opponent lineup features.
+        Uses only columns already present in the Statcast cache.
+
+        Columns returned
+        ----------------
+        batter, season,
+        k_pct       — strikeouts / PA
+        bb_pct      — walks / PA
+        swstr_pct   — swinging strikes / total pitches faced
+        o_swing_pct — swings on pitches outside zone / pitches outside zone
+        contact_pct — (swings − whiffs) / swings
+        n_pa        — plate appearances (quality filter)
+        """
+        if pitches_df.empty:
+            return pd.DataFrame()
+
+        df = pitches_df.copy()
+        df["game_date"] = pd.to_datetime(df["game_date"])
+        df["season"] = df["game_date"].dt.year
+
+        # PA-ending events
+        df["is_k"]  = df["events"] == "strikeout"
+        df["is_bb"] = df["events"].isin(["walk", "intent_walk"])
+        df["is_pa"] = df["events"].notna() & (df["events"].astype(str).str.strip() != "")
+
+        # Pitch-level outcomes
+        df["is_whiff"] = df["description"].isin(WHIFF_DESCRIPTIONS)
+        df["is_swing"] = df["description"].isin(SWING_DESCRIPTIONS)
+
+        # Out-of-zone pitches and swings (zone 11–14)
+        zone_num = pd.to_numeric(df["zone"], errors="coerce")
+        df["is_out_zone"]  = zone_num.between(11, 14)
+        df["is_swing_out"] = df["is_swing"] & df["is_out_zone"]
+
+        grp = df.groupby(["batter", "season"])
+
+        agg = grp.agg(
+            n_pa             = ("is_pa",        "sum"),
+            k                = ("is_k",         "sum"),
+            bb               = ("is_bb",        "sum"),
+            n_pitches        = ("pitch_type",   "count"),
+            whiffs           = ("is_whiff",     "sum"),
+            swings           = ("is_swing",     "sum"),
+            out_zone_pitches = ("is_out_zone",  "sum"),
+            swings_out       = ("is_swing_out", "sum"),
+        ).reset_index()
+
+        pa = agg["n_pa"].clip(lower=1)
+        agg["k_pct"]       = agg["k"]  / pa
+        agg["bb_pct"]      = agg["bb"] / pa
+        agg["swstr_pct"]   = agg["whiffs"] / agg["n_pitches"].clip(lower=1)
+        agg["o_swing_pct"] = agg["swings_out"] / agg["out_zone_pitches"].clip(lower=1)
+        agg["contact_pct"] = (
+            (agg["swings"] - agg["whiffs"]) / agg["swings"].clip(lower=1)
+        )
+
+        # Minimum 50 PA to suppress noise from bench/platoon appearances
+        agg = agg[agg["n_pa"] >= 50].copy()
+
+        keep = ["batter", "season", "k_pct", "bb_pct", "swstr_pct",
+                "o_swing_pct", "contact_pct", "n_pa"]
+        result = agg[keep].reset_index(drop=True)
+        logger.info(
+            f"Batter season stats computed: {len(result):,} batter-seasons "
+            f"({result['season'].nunique()} seasons, "
+            f"{result['batter'].nunique():,} batters)"
+        )
+        return result
+
+    def get_batter_season_stats_cache(
+        self,
+        start_year: int,
+        end_year: int,
+        force_refresh: bool = False,
+    ) -> pd.DataFrame:
+        """
+        Return per-batter season stats for the given year range.
+
+        Resolution order (avoids expensive downloads on every daily run):
+        1. Exact-match parquet: batter_season_{start}_{end}.parquet
+        2. Any other batter_season_*.parquet in PROCESSED_DIR (e.g. from the
+           most-recent model training run) — used as-is because it covers all
+           the seasons we need.
+        3. Build from existing per-year league Statcast parquets
+           (statcast_league_{year}-03-01_{year}-11-01.parquet, already on disk).
+        4. Last resort: download a fresh combined range (slow, ~5 min).
+
+        Parameters
+        ----------
+        start_year / end_year : season years (inclusive)
+        force_refresh         : skip caches and recompute from Statcast
+        """
+        cache_path = PROCESSED_DIR / f"batter_season_{start_year}_{end_year}.parquet"
+
+        if cache_path.exists() and not force_refresh:
+            logger.info(f"Loading cached batter season stats: {cache_path.name}")
+            return pd.read_parquet(cache_path)
+
+        # Step 2: any existing batter_season_*.parquet produced by model training
+        if not force_refresh:
+            existing = sorted(
+                PROCESSED_DIR.glob("batter_season_*.parquet"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if existing:
+                logger.info(
+                    f"Using existing batter stats file: {existing[0].name} "
+                    f"(run model_trainer.py --refresh to regenerate)"
+                )
+                return pd.read_parquet(existing[0])
+
+        # Step 3: build from per-year Statcast parquets already on disk
+        per_year_dfs = []
+        for yr in range(start_year, end_year + 1):
+            per_yr = self.cache_dir / f"statcast_league_{yr}-03-01_{yr}-11-01.parquet"
+            if per_yr.exists():
+                logger.info(f"Loading per-year Statcast for batter stats: {per_yr.name}")
+                per_year_dfs.append(pd.read_parquet(per_yr))
+
+        if per_year_dfs:
+            pitches = pd.concat(per_year_dfs, ignore_index=True)
+        else:
+            # Step 4: download (only happens once on a fresh deployment)
+            start_dt = f"{start_year}-03-01"
+            end_dt   = f"{end_year}-11-01"
+            logger.info(
+                f"No cached Statcast found — fetching league-wide data "
+                f"({start_dt} → {end_dt}). This may take several minutes."
+            )
+            pitches = self.get_statcast_date_range(start_dt, end_dt)
+            if pitches.empty:
+                logger.warning("No league-wide Statcast available — batter stats will be empty")
+                return pd.DataFrame()
+
+        result = self.compute_batter_season_stats(pitches)
+        if not result.empty:
+            result.to_parquet(cache_path, index=False)
+            logger.info(
+                f"Batter season stats cached: {len(result):,} batter-seasons "
+                f"-> {cache_path.name}"
+            )
+        return result
