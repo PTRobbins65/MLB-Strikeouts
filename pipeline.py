@@ -287,14 +287,14 @@ class DailyPipeline:
         # 6. Feature assembly
         features_df = self.assemble_features(games, statcast_starts)
 
-        # 7. Persist to disk
+        # 7. Add predictions FIRST, then save — the API checks for predicted_k
+        features_df, model_version = self._add_predictions(features_df)
+
+        # 8. Persist to disk (includes predicted_k so the API can serve it)
         if not features_df.empty:
             out_path = FEATURES_DIR / f"features_{self.target_date}.parquet"
             features_df.to_parquet(out_path, index=False)
-            logger.info(f"Features saved -> {out_path}")
-
-        # 8. Predictions (if a trained model exists)
-        features_df, model_version = self._add_predictions(features_df)
+            logger.info(f"Features saved -> {out_path} ({len(features_df)} rows)")
 
         # 9. Accuracy tracking
         if not features_df.empty and "predicted_k" in features_df.columns:
