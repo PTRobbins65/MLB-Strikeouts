@@ -111,7 +111,12 @@ class FeatureBuilder:
     ):
         self.fg_pitchers = fg_pitcher_df
         self.fg_batters  = fg_batter_df
-        self.starts      = statcast_starts.sort_values(["pitcher", "game_date"]).copy()
+        if not statcast_starts.empty:
+            self.starts = statcast_starts.sort_values(["pitcher", "game_date"]).copy()
+        else:
+            self.starts = pd.DataFrame(columns=["pitcher", "game_date", "strikeouts",
+                                                 "whiff_pct", "csw_pct", "zone_pct",
+                                                 "o_swing_pct", "avg_velo", "pitches"])
         self.umpires     = umpire_k_df
 
         # Statcast-derived season stats (replaces FanGraphs when available).

@@ -114,18 +114,20 @@ class HistoricalDataFetcher:
         )
         try:
             import signal
+            _has_sigalrm = hasattr(signal, "SIGALRM")  # False on Windows
 
-            def _timeout_handler(signum, frame):
-                raise TimeoutError(f"Statcast fetch timed out for mlbam_id={mlbam_id}")
-
-            # Per-pitcher 90-second hard limit (pybaseball can hang indefinitely)
-            old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
-            signal.alarm(90)
+            if _has_sigalrm:
+                def _timeout_handler(signum, frame):
+                    raise TimeoutError(f"Statcast fetch timed out for mlbam_id={mlbam_id}")
+                # Per-pitcher 90-second hard limit (pybaseball can hang indefinitely)
+                old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
+                signal.alarm(90)
             try:
                 new_df = pb.statcast_pitcher(fetch_start_str, end_dt, mlbam_id)
             finally:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
+                if _has_sigalrm:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, old_handler)
         except TimeoutError as exc:
             logger.warning(str(exc))
             # Return whatever we have in cache rather than nothing
