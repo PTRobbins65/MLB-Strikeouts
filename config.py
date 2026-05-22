@@ -21,13 +21,16 @@ for d in [RAW_DIR, PROCESSED_DIR, FEATURES_DIR, LOG_DIR]:
 # ── MLB StatsAPI Settings ─────────────────────────────────────────────────────
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 
-# Hydration options for the schedule endpoint
+# Hydration options for the schedule endpoint.
+# NOTE: Do NOT add a "fields" filter on top of this hydrate — it strips
+# nested sub-fields like pitchHand.code and causes probablePitcher to
+# come back empty.  Let the API return the full hydrated payload.
 SCHEDULE_HYDRATE = (
-    "probablePitcher(note),"
+    "probablePitcher,"
     "lineups,"
     "team,"
-    "linescore,"
-    "game(content(summary))"
+    "venue,"
+    "linescore"
 )
 
 # Game status codes that mean lineup is confirmed

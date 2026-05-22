@@ -113,18 +113,12 @@ class LineupManager:
         date_str = self.target_date.strftime("%Y-%m-%d")
         logger.info(f"Fetching schedule for {date_str}")
 
+        # NOTE: no "fields" filter here — it conflicts with hydrate and strips
+        # nested sub-fields like pitchHand.code from probablePitcher.
         data = _mlb_get("schedule", params={
             "sportId": 1,
             "date": date_str,
             "hydrate": SCHEDULE_HYDRATE,
-            "fields": (
-                "dates,games,gamePk,status,abstractGameState,detailedState,"
-                "teams,away,home,team,id,name,abbreviation,"
-                "probablePitcher,id,fullName,pitchHand,"
-                "lineups,awayPlayers,homePlayers,"
-                "battingOrder,playerName,primaryPosition,"
-                "gameDate"
-            ),
         })
 
         games = []
@@ -133,6 +127,7 @@ class LineupManager:
                 away = g["teams"]["away"]
                 home = g["teams"]["home"]
 
+                venue   = g.get("venue", {})
                 game_info = {
                     "game_pk":   g["gamePk"],
                     "game_date": date_str,
@@ -142,6 +137,7 @@ class LineupManager:
                     "home_team_id": home["team"]["id"],
                     "game_status": g["status"]["detailedState"],
                     "game_time": g.get("gameDate", ""),
+                    "venue_id": venue.get("id", 680),
                     "probable_pitcher_away": self._extract_probable(away),
                     "probable_pitcher_home": self._extract_probable(home),
                 }
@@ -162,7 +158,19 @@ class LineupManager:
                             game_status=g["status"]["detailedState"],
                         )
 
-        logger.info(f"Found {len(games)} games on {date_str}")
+        pitchers_found = sum(
+            1 for g in games
+            if g.get("probable_pitcher_home") or g.get("probable_pitcher_away")
+        )
+        logger.info(
+            f"Found {len(games)} games on {date_str} "
+            f"({pitchers_found} games with at least one probable pitcher)"
+        )
+        if len(games) > 0 and pitchers_found == 0:
+            logger.warning(
+                "No probable pitchers returned by StatsAPI for any game — "
+                "predictions will be empty. Check hydrate and schedule endpoint."
+            )
         return games
 
     def get_lineup(self, game_pk: int) -> Optional[LineupCard]:
@@ -386,12 +394,18 @@ class LineupManager:
     def _extract_probable(team_dict: dict) -> Optional[Dict]:
         pp = team_dict.get("probablePitcher")
         if not pp:
+            team_name = team_dict.get("team", {}).get("name", "?")
+            logger.debug(f"No probablePitcher key for {team_name} — "
+                         f"team_dict keys: {list(team_dict.keys())}")
             return None
-        return {
+        pitcher = {
             "id":       pp.get("id"),
             "fullName": pp.get("fullName"),
             "throws":   pp.get("pitchHand", {}).get("code", "R"),
         }
+        logger.debug(f"Probable pitcher found: {pitcher['fullName']} "
+                     f"(id={pitcher['id']}, throws={pitcher['throws']})")
+        return pitcher
 
     @staticmethod
     def _parse_boxscore_lineup(team_data: dict) -> List[BatterSlot]:
