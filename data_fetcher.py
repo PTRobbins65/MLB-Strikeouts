@@ -57,22 +57,61 @@ class HistoricalDataFetcher:
     ) -> pd.DataFrame:
         """
         Return pitch-level Statcast rows for a single pitcher.
-        Cached by pitcher × date range.
+
+        Cache strategy (incremental):
+        - Cache file: statcast_pitcher_{mlbam_id}.parquet  (no date range in name)
+        - On hit: if cached data covers through yesterday, return it immediately
+        - If stale: fetch only the delta (last cached date → end_dt) and append
+        - First run: full fetch from start_dt → end_dt, then cached forever
+
+        This means after the first run each pitcher costs ~1 small API call per
+        day instead of a full re-download.
 
         Parameters
         ----------
-        mlbam_id    : MLB Advanced Media player ID (e.g. 477132 for Kershaw)
-        start_dt    : "YYYY-MM-DD"
-        end_dt      : "YYYY-MM-DD"
+        mlbam_id : MLB Advanced Media player ID
+        start_dt : "YYYY-MM-DD" — earliest date needed
+        end_dt   : "YYYY-MM-DD" — latest date needed (usually yesterday)
         """
-        cache_path = self.cache_dir / f"statcast_pitcher_{mlbam_id}_{start_dt}_{end_dt}.parquet"
+        cache_path = self.cache_dir / f"statcast_pitcher_{mlbam_id}.parquet"
+        start_date = pd.to_datetime(start_dt)
+        end_date   = pd.to_datetime(end_dt)
+
+        cached_df = pd.DataFrame()
+        fetch_from = start_date   # default: full fetch
 
         if cache_path.exists() and not force_refresh:
-            logger.info(f"Loading cached Statcast data: {cache_path.name}")
-            return pd.read_parquet(cache_path)
+            try:
+                cached_df  = pd.read_parquet(cache_path)
+                cached_df["game_date"] = pd.to_datetime(cached_df["game_date"])
+                max_cached = cached_df["game_date"].max()
+
+                if max_cached >= end_date - timedelta(days=1):
+                    # Cache is fresh — filter to requested window and return
+                    logger.info(
+                        f"Cache hit for mlbam_id={mlbam_id} "
+                        f"(cached through {max_cached.date()})"
+                    )
+                    return cached_df[cached_df["game_date"] >= start_date].reset_index(drop=True)
+
+                # Cache exists but is stale — only fetch the delta
+                fetch_from = max_cached + timedelta(days=1)
+                logger.info(
+                    f"Incremental update for mlbam_id={mlbam_id}: "
+                    f"{fetch_from.date()} → {end_dt}"
+                )
+            except Exception as exc:
+                logger.warning(f"Cache read failed for mlbam_id={mlbam_id}: {exc} — full refresh")
+                cached_df  = pd.DataFrame()
+                fetch_from = start_date
+
+        fetch_start_str = fetch_from.strftime("%Y-%m-%d")
 
         pb = _pybaseball()
-        logger.info(f"Fetching Statcast pitches for mlbam_id={mlbam_id} ({start_dt} -> {end_dt})")
+        logger.info(
+            f"Fetching Statcast for mlbam_id={mlbam_id} "
+            f"({fetch_start_str} → {end_dt})"
+        )
         try:
             import signal
 
@@ -83,29 +122,40 @@ class HistoricalDataFetcher:
             old_handler = signal.signal(signal.SIGALRM, _timeout_handler)
             signal.alarm(90)
             try:
-                df = pb.statcast_pitcher(start_dt, end_dt, mlbam_id)
+                new_df = pb.statcast_pitcher(fetch_start_str, end_dt, mlbam_id)
             finally:
                 signal.alarm(0)
                 signal.signal(signal.SIGALRM, old_handler)
         except TimeoutError as exc:
             logger.warning(str(exc))
-            return pd.DataFrame()
+            # Return whatever we have in cache rather than nothing
+            return cached_df[cached_df["game_date"] >= start_date].reset_index(drop=True) if not cached_df.empty else pd.DataFrame()
         except Exception as exc:
             logger.warning(f"Statcast fetch failed for mlbam_id={mlbam_id}: {exc}")
-            return pd.DataFrame()
+            return cached_df[cached_df["game_date"] >= start_date].reset_index(drop=True) if not cached_df.empty else pd.DataFrame()
 
-        if df is None or df.empty:
-            logger.warning(f"No Statcast data returned for mlbam_id={mlbam_id}")
-            return pd.DataFrame()
+        if new_df is None or new_df.empty:
+            logger.info(f"No new Statcast rows for mlbam_id={mlbam_id} (up to date)")
+            return cached_df[cached_df["game_date"] >= start_date].reset_index(drop=True) if not cached_df.empty else pd.DataFrame()
 
-        # Keep only the columns we care about (gracefully ignore missing ones)
-        keep = [c for c in STATCAST_PITCHER_COLS if c in df.columns]
-        df = df[keep].copy()
-        df["game_date"] = pd.to_datetime(df["game_date"])
+        # Trim to requested columns
+        keep   = [c for c in STATCAST_PITCHER_COLS if c in new_df.columns]
+        new_df = new_df[keep].copy()
+        new_df["game_date"] = pd.to_datetime(new_df["game_date"])
 
-        df.to_parquet(cache_path, index=False)
-        logger.info(f"Cached {len(df):,} rows -> {cache_path.name}")
-        return df
+        # Merge with existing cache and deduplicate
+        combined = pd.concat([cached_df, new_df], ignore_index=True)
+        combined = combined.drop_duplicates(
+            subset=["game_date", "pitcher", "at_bat_number"], keep="last"
+        ).sort_values("game_date").reset_index(drop=True)
+
+        combined.to_parquet(cache_path, index=False)
+        logger.info(
+            f"Cache updated for mlbam_id={mlbam_id}: "
+            f"{len(new_df):,} new rows, {len(combined):,} total → {cache_path.name}"
+        )
+
+        return combined[combined["game_date"] >= start_date].reset_index(drop=True)
 
     def get_statcast_date_range(
         self,
