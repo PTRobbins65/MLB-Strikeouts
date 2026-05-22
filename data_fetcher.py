@@ -73,7 +73,7 @@ class HistoricalDataFetcher:
         start_dt : "YYYY-MM-DD" — earliest date needed
         end_dt   : "YYYY-MM-DD" — latest date needed (usually yesterday)
         """
-        cache_path = self.cache_dir / f"statcast_pitcher_{mlbam_id}.parquet"
+        cache_path = self.cache_dir / f"statcast_pitcher_v2_{mlbam_id}.parquet"
         start_date = pd.to_datetime(start_dt)
         end_date   = pd.to_datetime(end_dt)
 
@@ -143,11 +143,11 @@ class HistoricalDataFetcher:
         new_df = new_df[keep].copy()
         new_df["game_date"] = pd.to_datetime(new_df["game_date"])
 
-        # Merge with existing cache and deduplicate
+        # Merge with existing cache — no dedup needed because incremental fetch
+        # starts from max_cached_date+1, so there is no overlap between the two.
+        # Sorting by game_date keeps the file in chronological order.
         combined = pd.concat([cached_df, new_df], ignore_index=True)
-        combined = combined.drop_duplicates(
-            subset=["game_date", "pitcher", "at_bat_number"], keep="last"
-        ).sort_values("game_date").reset_index(drop=True)
+        combined = combined.sort_values(["game_date", "at_bat_number"]).reset_index(drop=True)
 
         combined.to_parquet(cache_path, index=False)
         logger.info(
