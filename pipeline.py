@@ -144,14 +144,21 @@ class DailyPipeline:
 
     # ── Step 4: Load pitcher Statcast histories ────────────────────────────
 
-    def load_pitcher_statcast(self, games: List[dict]) -> pd.DataFrame:
+    def load_pitcher_statcast(self, games: List[dict]):
         """
         For each probable pitcher in today's games, fetch their Statcast
-        pitch history and compute per-start metrics.
-        Returns a single DataFrame with all pitchers' start-level stats.
+        pitch history and compute both per-start metrics and season-level stats.
+
+        Returns
+        -------
+        (statcast_starts, statcast_season) : tuple of DataFrames
+            statcast_starts  — one row per start (used for rolling features)
+            statcast_season  — one row per (pitcher, season) with k_pct_season,
+                               swstr_season, fip_season, etc.  Replaces FanGraphs.
         """
-        all_starts = []
-        seen_ids   = set()
+        all_starts  = []
+        all_pitches = []   # raw pitches — needed for season-level aggregation
+        seen_ids    = set()
 
         start_dt = (self.target_date - timedelta(days=365 * self.history_years)).strftime("%Y-%m-%d")
         end_dt   = (self.target_date - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -174,14 +181,23 @@ class DailyPipeline:
 
                 starts = self.fetcher.compute_per_start_metrics(pitches)
                 all_starts.append(starts)
+                all_pitches.append(pitches)   # keep raw for season aggregation
 
         if not all_starts:
             logger.warning("No per-start Statcast data assembled")
-            return pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame()
 
-        combined = pd.concat(all_starts, ignore_index=True)
-        logger.info(f"Per-start data: {len(combined):,} rows for {len(seen_ids)} pitchers")
-        return combined
+        combined_starts  = pd.concat(all_starts,  ignore_index=True)
+        combined_pitches = pd.concat(all_pitches, ignore_index=True)
+
+        logger.info(
+            f"Per-start data: {len(combined_starts):,} rows for {len(seen_ids)} pitchers"
+        )
+
+        # Compute season-level stats from raw pitches (replaces FanGraphs)
+        season_stats = self.fetcher.compute_pitcher_season_stats(combined_pitches)
+
+        return combined_starts, season_stats
 
     # ── Step 5: Assemble feature rows ─────────────────────────────────────
 
@@ -189,6 +205,7 @@ class DailyPipeline:
         self,
         games: List[dict],
         statcast_starts: pd.DataFrame,
+        statcast_season: Optional[pd.DataFrame] = None,
     ) -> pd.DataFrame:
         """
         Build one feature row per starting pitcher per game.
@@ -201,6 +218,7 @@ class DailyPipeline:
             fg_pitcher_df   = self.fg_pitchers,
             fg_batter_df    = self.fg_batters,
             statcast_starts = statcast_starts,
+            statcast_season = statcast_season,
         )
 
         feature_rows = []
@@ -268,8 +286,8 @@ class DailyPipeline:
         # 3. Projected lineups
         self.build_projected_lineups(games)
 
-        # 4. Pitcher Statcast history
-        statcast_starts = self.load_pitcher_statcast(games)
+        # 4. Pitcher Statcast history + season-level stats
+        statcast_starts, statcast_season = self.load_pitcher_statcast(games)
 
         # 5. Start polling for confirmed lineups
         if wait_for_lineups:
@@ -285,7 +303,7 @@ class DailyPipeline:
                 self.lineup.stop_polling()
 
         # 6. Feature assembly
-        features_df = self.assemble_features(games, statcast_starts)
+        features_df = self.assemble_features(games, statcast_starts, statcast_season)
 
         # 7. Add predictions FIRST, then save — the API checks for predicted_k
         features_df, model_version = self._add_predictions(features_df)

@@ -391,6 +391,90 @@ class HistoricalDataFetcher:
             for slot, (_, row) in enumerate(first_ab.iterrows())
         ]
 
+    # ── Computed season-level stats from Statcast ─────────────────────────
+
+    def compute_pitcher_season_stats(self, pitches_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Aggregate raw pitch-level Statcast data into one row per (pitcher, season).
+
+        Replaces the FanGraphs season-level stats that are blocked (403).  Uses
+        only columns already in the Statcast cache, so no extra API calls are
+        needed.
+
+        Columns returned
+        ----------------
+        pitcher, season,
+        k_pct_season    — strikeouts / batters faced
+        bb_pct_season   — walks / batters faced
+        swstr_season    — whiffs / total pitches (SwStr%)
+        k9_season       — K per 9 estimated innings (PA / 4.2 ≈ IP)
+        fip_season      — FIP using estimated IP + FIP constant 3.17
+        avg_velo_season — mean release speed
+        n_pa            — batters faced (quality filter; exclude low-sample seasons)
+        """
+        if pitches_df.empty:
+            return pd.DataFrame()
+
+        df = pitches_df.copy()
+        df["game_date"] = pd.to_datetime(df["game_date"])
+        df["season"] = df["game_date"].dt.year
+
+        # Event flags — events column is only populated on the last pitch of each PA
+        df["is_k"]   = df["events"] == "strikeout"
+        df["is_bb"]  = df["events"].isin(["walk", "intent_walk"])
+        df["is_hr"]  = df["events"] == "home_run"
+        df["is_hbp"] = df["events"] == "hit_by_pitch"
+        # Any non-null events value = end of a plate appearance
+        df["is_pa"]  = df["events"].notna() & (df["events"].astype(str).str.strip() != "")
+        df["is_whiff"] = df["description"].isin(WHIFF_DESCRIPTIONS)
+
+        grp = df.groupby(["pitcher", "season"])
+
+        agg = grp.agg(
+            n_pa      = ("is_pa",    "sum"),
+            k         = ("is_k",     "sum"),
+            bb        = ("is_bb",    "sum"),
+            hr        = ("is_hr",    "sum"),
+            hbp       = ("is_hbp",   "sum"),
+            n_pitches = ("pitch_type", "count"),
+            whiffs    = ("is_whiff", "sum"),
+            avg_velo  = ("release_speed", "mean"),
+        ).reset_index()
+
+        pa  = agg["n_pa"].clip(lower=1)
+        ip  = pa / 4.2           # estimate: ~4.2 batters faced per inning (MLB avg)
+
+        agg["k_pct_season"]    = agg["k"]      / pa
+        agg["bb_pct_season"]   = agg["bb"]     / pa
+        agg["swstr_season"]    = agg["whiffs"] / agg["n_pitches"].clip(lower=1)
+        agg["k9_season"]       = agg["k"]      / ip * 9
+        agg["avg_velo_season"] = agg["avg_velo"]
+
+        # FIP = (13·HR + 3·(BB+HBP) − 2·K) / IP + constant
+        # FIP constant ≈ 3.17 (recent MLB average ERA − raw FIP)
+        FIP_CONSTANT = 3.17
+        agg["fip_season"] = (
+            (13 * agg["hr"] + 3 * (agg["bb"] + agg["hbp"]) - 2 * agg["k"])
+            / ip
+            + FIP_CONSTANT
+        )
+
+        # Filter to pitchers with at least 50 PA (avoids noise from spot appearances)
+        agg = agg[agg["n_pa"] >= 50].copy()
+
+        keep = [
+            "pitcher", "season",
+            "k_pct_season", "bb_pct_season", "swstr_season",
+            "k9_season", "fip_season", "avg_velo_season", "n_pa",
+        ]
+        result = agg[keep].reset_index(drop=True)
+        logger.info(
+            f"Season stats computed: {len(result)} pitcher-seasons "
+            f"({result['season'].nunique()} seasons, "
+            f"{result['pitcher'].nunique()} pitchers)"
+        )
+        return result
+
     # ── Computed per-start metrics from Statcast ───────────────────────────
 
     def compute_per_start_metrics(self, pitch_df: pd.DataFrame) -> pd.DataFrame:

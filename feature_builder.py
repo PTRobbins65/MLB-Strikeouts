@@ -107,13 +107,25 @@ class FeatureBuilder:
         fg_batter_df: pd.DataFrame,
         statcast_starts: pd.DataFrame,
         umpire_k_df: Optional[pd.DataFrame] = None,
+        statcast_season: Optional[pd.DataFrame] = None,
     ):
         self.fg_pitchers = fg_pitcher_df
         self.fg_batters  = fg_batter_df
         self.starts      = statcast_starts.sort_values(["pitcher", "game_date"]).copy()
         self.umpires     = umpire_k_df
 
-        # ID mapper for MLBAM -> FanGraphs IDfg lookups
+        # Statcast-derived season stats (replaces FanGraphs when available).
+        # Index by (pitcher MLBAM, season year) for O(1) lookup.
+        if statcast_season is not None and not statcast_season.empty:
+            self._sc_season_idx = statcast_season.set_index(["pitcher", "season"])
+            logger.info(
+                f"Statcast season stats loaded: "
+                f"{len(statcast_season)} pitcher-seasons available"
+            )
+        else:
+            self._sc_season_idx = None
+
+        # ID mapper for MLBAM -> FanGraphs IDfg lookups (fallback only)
         self._id_mapper = None
         if _IdMapper is not None:
             try:
@@ -177,23 +189,41 @@ class FeatureBuilder:
         row["days_rest"]        = (game_dt - last_start["game_date"]).days
         row["pitches_last"]     = last_start.get("pitches", np.nan)
 
-        # ── 2. FanGraphs season-level pitcher features ────────────────────
+        # ── 2. Season-level pitcher features ──────────────────────────────
+        # Priority: Statcast-derived stats (computed from our own cache, no
+        # FanGraphs dependency) → FanGraphs (if unblocked) → NaN fallback.
         season = game_dt.year
-        fg_row = self._get_fg_pitcher(pitcher_mlbam_id, season)
-        if fg_row is not None:
-            row["k9_season"]       = fg_row.get("K/9",    np.nan)
-            row["k_pct_season"]    = fg_row.get("K%",     np.nan)
-            row["bb_pct_season"]   = fg_row.get("BB%",    np.nan)
-            row["fip_season"]      = fg_row.get("FIP",    np.nan)
-            row["xfip_season"]     = fg_row.get("xFIP",   np.nan)
-            row["swstr_season"]    = fg_row.get("SwStr%", np.nan)
-            row["stuff_plus"]      = fg_row.get("Stuff+", np.nan)
+        sc_row = self._get_statcast_season(pitcher_mlbam_id, season)
+        if sc_row is not None:
+            row["k9_season"]    = sc_row.get("k9_season",    np.nan)
+            row["k_pct_season"] = sc_row.get("k_pct_season", np.nan)
+            row["bb_pct_season"]= sc_row.get("bb_pct_season",np.nan)
+            row["fip_season"]   = sc_row.get("fip_season",   np.nan)
+            row["swstr_season"] = sc_row.get("swstr_season", np.nan)
+            # xFIP and Stuff+ are FanGraphs-only — leave NaN
+            row["xfip_season"]  = np.nan
+            row["stuff_plus"]   = np.nan
+            logger.debug(
+                f"Statcast season stats used for mlbam={pitcher_mlbam_id} "
+                f"season={season}: k_pct={row['k_pct_season']:.3f}, "
+                f"swstr={row['swstr_season']:.3f}, fip={row['fip_season']:.2f}"
+            )
         else:
-            # Fall back to career rolling average if current season is short
-            row.update({k: np.nan for k in [
-                "k9_season","k_pct_season","bb_pct_season",
-                "fip_season","xfip_season","swstr_season","stuff_plus"
-            ]})
+            # Fallback: try FanGraphs (may be blocked)
+            fg_row = self._get_fg_pitcher(pitcher_mlbam_id, season)
+            if fg_row is not None:
+                row["k9_season"]    = fg_row.get("K/9",    np.nan)
+                row["k_pct_season"] = fg_row.get("K%",     np.nan)
+                row["bb_pct_season"]= fg_row.get("BB%",    np.nan)
+                row["fip_season"]   = fg_row.get("FIP",    np.nan)
+                row["xfip_season"]  = fg_row.get("xFIP",   np.nan)
+                row["swstr_season"] = fg_row.get("SwStr%", np.nan)
+                row["stuff_plus"]   = fg_row.get("Stuff+", np.nan)
+            else:
+                row.update({k: np.nan for k in [
+                    "k9_season", "k_pct_season", "bb_pct_season",
+                    "fip_season", "xfip_season", "swstr_season", "stuff_plus",
+                ]})
 
         # ── 3. Opponent lineup features ───────────────────────────────────
         opp_batters = lineup_card.away_batters if is_home else lineup_card.home_batters
@@ -363,6 +393,28 @@ class FeatureBuilder:
         }
 
     # ── Lookup helpers ─────────────────────────────────────────────────────
+
+    def _get_statcast_season(self, mlbam_id: int, season: int) -> Optional[Dict]:
+        """
+        Return Statcast-derived season stats dict for a pitcher.
+
+        Tries current season first, falls back to previous season if the
+        pitcher hasn't yet accumulated 50 PA in the current year (e.g. early
+        April when season stats are sparse).
+        """
+        if self._sc_season_idx is None:
+            return None
+
+        for yr in [season, season - 1]:
+            try:
+                row = self._sc_season_idx.loc[(mlbam_id, yr)]
+                # loc can return a Series (single match) or DataFrame (multiple)
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[0]
+                return row.to_dict()
+            except KeyError:
+                continue
+        return None
 
     def _get_fg_pitcher(self, mlbam_id: int, season: int) -> Optional[Dict]:
         """
