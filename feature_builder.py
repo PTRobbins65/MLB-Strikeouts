@@ -5,7 +5,7 @@ and context data (park, umpire, weather) and assembles one flat feature
 row per pitcher × game.
 
 This is the central transformation step:
-    raw data  →  FeatureBuilder  →  model input
+    raw data  ->  FeatureBuilder  ->  model input
 
 Usage
 -----
@@ -104,7 +104,7 @@ class FeatureBuilder:
         self.starts      = statcast_starts.sort_values(["pitcher", "game_date"]).copy()
         self.umpires     = umpire_k_df
 
-        # ID mapper for MLBAM → FanGraphs IDfg lookups
+        # ID mapper for MLBAM -> FanGraphs IDfg lookups
         self._id_mapper = None
         if _IdMapper is not None:
             try:
@@ -222,7 +222,7 @@ class FeatureBuilder:
             home_team, away_team, home_team_id, away_team_id,
             strikeouts  (target)
 
-        lineup_lookup : optional dict of game_pk → LineupCard built from
+        lineup_lookup : optional dict of game_pk -> LineupCard built from
                         historical Statcast data. When provided, real opponent
                         batters replace the empty synthetic LineupCards,
                         populating opp_lineup_* features for every training row.
@@ -356,7 +356,7 @@ class FeatureBuilder:
     def _get_fg_pitcher(self, mlbam_id: int, season: int) -> Optional[Dict]:
         """
         Return FanGraphs pitcher row for a given season.
-        Uses MLBAM → IDfg mapping via IdMapper (Chadwick Bureau register).
+        Uses MLBAM -> IDfg mapping via IdMapper (Chadwick Bureau register).
         Falls back to previous season if current season isn't yet available.
         """
         if self.fg_pitchers.empty or self._id_mapper is None:
@@ -376,7 +376,7 @@ class FeatureBuilder:
         return None
 
     def _get_fg_batter(self, player_id: int, season: int) -> Optional[Dict]:
-        """Return FanGraphs batter row matched by MLBAM → IDfg mapping."""
+        """Return FanGraphs batter row matched by MLBAM -> IDfg mapping."""
         if self.fg_batters.empty or self._id_mapper is None:
             return None
 

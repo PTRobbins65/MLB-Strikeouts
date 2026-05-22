@@ -94,7 +94,7 @@ class LineupManager:
 
     def __init__(self, target_date: Optional[date] = None):
         self.target_date = target_date or date.today()
-        self._cache: Dict[int, LineupCard] = {}       # game_pk → LineupCard
+        self._cache: Dict[int, LineupCard] = {}       # game_pk -> LineupCard
         self._lock = threading.Lock()
         self._poll_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -221,7 +221,7 @@ class LineupManager:
         })
 
         # Collect batting orders from completed games
-        slot_votes: Dict[int, Dict[int, int]] = {}  # player_id → {slot: count}
+        slot_votes: Dict[int, Dict[int, int]] = {}  # player_id -> {slot: count}
         slot_names: Dict[int, str] = {}
         slot_pos:   Dict[int, str] = {}
         games_counted = 0
@@ -410,7 +410,7 @@ class LineupManager:
             if bo is None:
                 continue
             try:
-                bo_int = int(str(bo).rstrip("0") or "0")   # "100" → 1, "200" → 2, etc.
+                bo_int = int(str(bo).rstrip("0") or "0")   # "100" -> 1, "200" -> 2, etc.
             except ValueError:
                 continue
             if bo_int < 1 or bo_int > 9:
@@ -451,4 +451,4 @@ class LineupManager:
             "away_batters": [vars(b) for b in card.away_batters],
         }
         out_path.write_text(json.dumps(payload, indent=2))
-        logger.info(f"Lineup snapshot saved → {out_path.name}")
+        logger.info(f"Lineup snapshot saved -> {out_path.name}")

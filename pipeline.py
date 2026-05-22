@@ -290,7 +290,7 @@ class DailyPipeline:
         if not features_df.empty:
             out_path = FEATURES_DIR / f"features_{self.target_date}.parquet"
             features_df.to_parquet(out_path, index=False)
-            logger.info(f"Features saved → {out_path}")
+            logger.info(f"Features saved -> {out_path}")
 
         # 8. Predictions (if a trained model exists)
         features_df = self._add_predictions(features_df)

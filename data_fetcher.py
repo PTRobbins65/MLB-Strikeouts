@@ -72,7 +72,7 @@ class HistoricalDataFetcher:
             return pd.read_parquet(cache_path)
 
         pb = _pybaseball()
-        logger.info(f"Fetching Statcast pitches for mlbam_id={mlbam_id} ({start_dt} → {end_dt})")
+        logger.info(f"Fetching Statcast pitches for mlbam_id={mlbam_id} ({start_dt} -> {end_dt})")
         df = pb.statcast_pitcher(start_dt, end_dt, mlbam_id)
 
         if df is None or df.empty:
@@ -85,7 +85,7 @@ class HistoricalDataFetcher:
         df["game_date"] = pd.to_datetime(df["game_date"])
 
         df.to_parquet(cache_path, index=False)
-        logger.info(f"Cached {len(df):,} rows → {cache_path.name}")
+        logger.info(f"Cached {len(df):,} rows -> {cache_path.name}")
         return df
 
     def get_statcast_date_range(
@@ -106,7 +106,7 @@ class HistoricalDataFetcher:
             return pd.read_parquet(cache_path)
 
         pb = _pybaseball()
-        logger.info(f"Fetching league-wide Statcast ({start_dt} → {end_dt}) — may take several minutes")
+        logger.info(f"Fetching league-wide Statcast ({start_dt} -> {end_dt}) — may take several minutes")
         df = pb.statcast(start_dt=start_dt, end_dt=end_dt)
 
         if df is None or df.empty:
@@ -116,7 +116,7 @@ class HistoricalDataFetcher:
         df = df[keep].copy()
         df["game_date"] = pd.to_datetime(df["game_date"])
         df.to_parquet(cache_path, index=False)
-        logger.info(f"Cached {len(df):,} rows → {cache_path.name}")
+        logger.info(f"Cached {len(df):,} rows -> {cache_path.name}")
         return df
 
     # ── FanGraphs — season-level ───────────────────────────────────────────
@@ -148,7 +148,7 @@ class HistoricalDataFetcher:
         keep = [c for c in FANGRAPHS_PITCHER_COLS if c in df.columns]
         df = df[keep].copy()
         df.to_parquet(cache_path, index=False)
-        logger.info(f"Cached {len(df):,} rows → {cache_path.name}")
+        logger.info(f"Cached {len(df):,} rows -> {cache_path.name}")
         return df
 
     def get_fangraphs_batter_stats(
@@ -185,7 +185,7 @@ class HistoricalDataFetcher:
         keep = [c for c in desired if c in df.columns]
         df = df[keep].copy()
         df.to_parquet(cache_path, index=False)
-        logger.info(f"Cached {len(df):,} rows → {cache_path.name}")
+        logger.info(f"Cached {len(df):,} rows -> {cache_path.name}")
         return df
 
     # ── Player ID lookup ───────────────────────────────────────────────────
@@ -211,7 +211,7 @@ class HistoricalDataFetcher:
         game_meta: Optional[pd.DataFrame] = None,
     ) -> Dict[int, object]:
         """
-        Build a game_pk → LineupCard dict from pitch-level Statcast data.
+        Build a game_pk -> LineupCard dict from pitch-level Statcast data.
         Reconstructs batting orders from the batter + at_bat_number columns
         with no additional API calls.
 

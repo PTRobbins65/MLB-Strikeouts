@@ -251,8 +251,8 @@ class ModelTrainer:
             }
             pd.DataFrame([meta]).to_parquet(meta_path, index=False)
 
-            logger.info(f"XGBoost saved  → {xgb_path.name}")
-            logger.info(f"Poisson GLM saved → {glm_path.name}")
+            logger.info(f"XGBoost saved  -> {xgb_path.name}")
+            logger.info(f"Poisson GLM saved -> {glm_path.name}")
             logger.info(f"Winner: {'XGBoost' if winner == 'xgb' else 'Poisson GLM'}")
 
         return summary

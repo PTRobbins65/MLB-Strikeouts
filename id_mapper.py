@@ -9,8 +9,8 @@ Usage
 
     from id_mapper import IdMapper
     mapper = IdMapper()
-    fg_id  = mapper.mlbam_to_fg(477132)   # → FanGraphs IDfg
-    mlbam  = mapper.fg_to_mlbam(3973)     # → MLBAM ID
+    fg_id  = mapper.mlbam_to_fg(477132)   # -> FanGraphs IDfg
+    mlbam  = mapper.fg_to_mlbam(3973)     # -> MLBAM ID
 """
 
 import logging
@@ -81,7 +81,7 @@ class IdMapper:
 
         MAP_PATH.parent.mkdir(parents=True, exist_ok=True)
         df.to_parquet(MAP_PATH, index=False)
-        logger.info(f"ID map saved: {len(df):,} players → {MAP_PATH.name}")
+        logger.info(f"ID map saved: {len(df):,} players -> {MAP_PATH.name}")
         return df
 
 
@@ -93,4 +93,4 @@ if __name__ == "__main__":
     # Quick smoke test with a known player
     KERSHAW_MLBAM = 477132
     fg = mapper.mlbam_to_fg(KERSHAW_MLBAM)
-    print(f"Kershaw (MLBAM {KERSHAW_MLBAM}) → FanGraphs IDfg {fg}")
+    print(f"Kershaw (MLBAM {KERSHAW_MLBAM}) -> FanGraphs IDfg {fg}")

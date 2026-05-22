@@ -5,7 +5,7 @@ with actual strikeout total and game context (park, home/away, opponent).
 
 Joins:
   - Statcast per-start metrics  (game_pk, strikeouts, pitcher_hand, is_home)
-  - MLB StatsAPI season schedule (game_pk → park_id, team names, is_night_game)
+  - MLB StatsAPI season schedule (game_pk -> park_id, team names, is_night_game)
 
 Output: data/processed/game_log_{start_year}_{end_year}.parquet
 
@@ -78,7 +78,7 @@ class GameLogBuilder:
         game_log.to_parquet(cache_path, index=False)
         logger.info(
             f"Game log saved: {len(game_log):,} pitcher-starts "
-            f"({start_year}–{end_year}) → {cache_path.name}"
+            f"({start_year}–{end_year}) -> {cache_path.name}"
         )
         return game_log
 
