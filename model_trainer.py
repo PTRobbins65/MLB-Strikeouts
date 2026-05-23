@@ -227,11 +227,11 @@ class ModelTrainer:
             ("glm",     PoissonRegressor(alpha=0.1, max_iter=500)),
         ])
 
-        # ── Cross-validate ─────────────────────────────────────────────────
-        logger.info("── XGBoost (Poisson) cross-validation ──")
+        # -- Cross-validate -------------------------------------------------
+        logger.info("-- XGBoost (Poisson) cross-validation --")
         xgb_cv = self._cross_validate(X, y, xgb_model, "XGBoost-Poisson")
 
-        logger.info("── Poisson GLM cross-validation ──")
+        logger.info("-- Poisson GLM cross-validation --")
         glm_cv = self._cross_validate(X, y, glm_model, "Poisson-GLM")
 
         # ── Final fit on full data ─────────────────────────────────────────
@@ -325,10 +325,10 @@ if __name__ == "__main__":
     # 3. Train, evaluate, and save
     summary = trainer.train(features_df, save=True)
 
-    print("\n── Training Summary ──────────────────────────────")
+    print("\n-- Training Summary --------------------------------------------------")
     print(f"  Samples trained on : {summary['n_train']:,}")
     print(f"  Features used      : {len(summary['features'])}")
-    print(f"  XGBoost  MAE       : {summary['xgb_cv']['mean_mae']:.3f} ± {summary['xgb_cv']['std_mae']:.3f}")
-    print(f"  Poisson GLM MAE    : {summary['glm_cv']['mean_mae']:.3f} ± {summary['glm_cv']['std_mae']:.3f}")
+    print(f"  XGBoost  MAE       : {summary['xgb_cv']['mean_mae']:.3f} +/- {summary['xgb_cv']['std_mae']:.3f}")
+    print(f"  Poisson GLM MAE    : {summary['glm_cv']['mean_mae']:.3f} +/- {summary['glm_cv']['std_mae']:.3f}")
     print(f"  Winner             : {'XGBoost' if summary['winner'] == 'xgb' else 'Poisson GLM'}")
     print(f"  Models saved to    : {MODEL_DIR}")
