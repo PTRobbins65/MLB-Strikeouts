@@ -159,31 +159,30 @@ def _load_predictions(target_date: date) -> pd.DataFrame:
     """
     Load saved feature/prediction parquet for target_date.
 
-    Reads the local fast path first; if absent (e.g. this web container never
-    ran the pipeline — the separate cron service did), falls back to object
-    storage and caches the result locally. Returns empty DataFrame if neither
-    source has it yet.
+    Object storage is the source of truth: it's written by the separate cron
+    service AND by /admin/refresh, so it always holds the latest run. We read it
+    FIRST (and never cache it to local disk — that would pin a stale copy and
+    miss intra-day updates like a lineup-confirm re-run). The local file is only
+    a fallback for when storage is unreachable. Returns empty if neither has it.
     """
-    path = FEATURES_DIR / f"features_{target_date}.parquet"
     df: Optional[pd.DataFrame] = None
 
-    if path.exists():
-        try:
-            df = pd.read_parquet(path)
-        except Exception as exc:
-            logger.error(f"Failed to load local predictions for {target_date}: {exc}")
-            df = None
+    # 1. Storage (R2) — authoritative, always current.
+    try:
+        df = get_storage().get_parquet(features_key(target_date))
+    except Exception as exc:
+        logger.error(f"Failed to load predictions from storage for {target_date}: {exc}")
+        df = None
 
+    # 2. Local fallback (e.g. storage down, or single-process dev runs).
     if df is None:
-        # Cross-service handoff: pull what the cron service published.
-        try:
-            df = get_storage().get_parquet(features_key(target_date))
-            if df is not None:
-                df.to_parquet(path, index=False)  # cache locally for next read
-                logger.info(f"Loaded predictions for {target_date} from storage")
-        except Exception as exc:
-            logger.error(f"Failed to load predictions from storage for {target_date}: {exc}")
-            df = None
+        path = FEATURES_DIR / f"features_{target_date}.parquet"
+        if path.exists():
+            try:
+                df = pd.read_parquet(path)
+            except Exception as exc:
+                logger.error(f"Failed to load local predictions for {target_date}: {exc}")
+                df = None
 
     if df is None or "predicted_k" not in df.columns:
         return pd.DataFrame()
