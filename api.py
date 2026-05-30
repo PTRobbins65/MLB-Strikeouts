@@ -46,7 +46,8 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from accuracy_tracker import AccuracyTracker
-from config import FEATURES_DIR, MODEL_DIR
+from config import FEATURES_DIR, MODEL_DIR, features_key
+from storage import get_storage
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 
@@ -157,20 +158,36 @@ def _get_model_info() -> dict:
 def _load_predictions(target_date: date) -> pd.DataFrame:
     """
     Load saved feature/prediction parquet for target_date.
-    Returns empty DataFrame if not yet computed.
+
+    Reads the local fast path first; if absent (e.g. this web container never
+    ran the pipeline — the separate cron service did), falls back to object
+    storage and caches the result locally. Returns empty DataFrame if neither
+    source has it yet.
     """
     path = FEATURES_DIR / f"features_{target_date}.parquet"
-    if not path.exists():
+    df: Optional[pd.DataFrame] = None
+
+    if path.exists():
+        try:
+            df = pd.read_parquet(path)
+        except Exception as exc:
+            logger.error(f"Failed to load local predictions for {target_date}: {exc}")
+            df = None
+
+    if df is None:
+        # Cross-service handoff: pull what the cron service published.
+        try:
+            df = get_storage().get_parquet(features_key(target_date))
+            if df is not None:
+                df.to_parquet(path, index=False)  # cache locally for next read
+                logger.info(f"Loaded predictions for {target_date} from storage")
+        except Exception as exc:
+            logger.error(f"Failed to load predictions from storage for {target_date}: {exc}")
+            df = None
+
+    if df is None or "predicted_k" not in df.columns:
         return pd.DataFrame()
-    try:
-        df = pd.read_parquet(path)
-        # Only return rows that have a prediction
-        if "predicted_k" not in df.columns:
-            return pd.DataFrame()
-        return df
-    except Exception as exc:
-        logger.error(f"Failed to load predictions for {target_date}: {exc}")
-        return pd.DataFrame()
+    return df
 
 
 def _df_to_predictions(df: pd.DataFrame) -> List[PredictionRow]:

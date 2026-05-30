@@ -41,6 +41,16 @@ FEATURES_DIR   = DATA_DIR / "features"
 for d in [RAW_DIR, PROCESSED_DIR, FEATURES_DIR, LOG_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
+# Object-storage key prefix for the daily features/predictions parquet.
+# The cron service writes features here; the web service reads them back, so
+# the two separate Railway containers share data via storage (see storage.py).
+FEATURES_KEY_PREFIX = "features/features_"
+
+
+def features_key(target_date) -> str:
+    """Storage key for a date's features parquet (mirrors the local filename)."""
+    return f"{FEATURES_KEY_PREFIX}{target_date}.parquet"
+
 # ── MLB StatsAPI Settings ─────────────────────────────────────────────────────
 MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
 

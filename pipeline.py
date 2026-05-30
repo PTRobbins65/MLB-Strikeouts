@@ -46,9 +46,10 @@ from typing import List, Optional
 import numpy as np
 import pandas as pd
 
-from config import DATA_DIR, FEATURES_DIR, LOG_DIR, MODEL_DIR, ROLLING_WINDOWS
+from config import DATA_DIR, FEATURES_DIR, LOG_DIR, MODEL_DIR, ROLLING_WINDOWS, features_key
 from accuracy_tracker import AccuracyTracker
 from daily_snapshot import load_latest_snapshot
+from storage import get_storage
 from feature_builder import FeatureBuilder, merge_batter_stuff
 from lineup_manager import LineupManager
 from model_trainer import FEATURE_COLS
@@ -362,11 +363,17 @@ class DailyPipeline:
         # 7. Add predictions FIRST, then save — the API checks for predicted_k
         features_df, model_version = self._add_predictions(features_df)
 
-        # 8. Persist to disk (includes predicted_k so the API can serve it)
+        # 8. Persist (includes predicted_k so the API can serve it).
+        #    Local disk = fast path for this process; object storage = the
+        #    cross-service handoff so the web dyno can read what the cron wrote.
         if not features_df.empty:
             out_path = FEATURES_DIR / f"features_{self.target_date}.parquet"
             features_df.to_parquet(out_path, index=False)
             logger.info(f"Features saved -> {out_path} ({len(features_df)} rows)")
+            try:
+                get_storage().put_parquet(features_df, features_key(self.target_date))
+            except Exception as exc:
+                logger.warning(f"Could not publish features to storage: {exc}")
 
         # 9. Accuracy tracking
         if not features_df.empty and "predicted_k" in features_df.columns:
