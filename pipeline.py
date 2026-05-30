@@ -17,10 +17,21 @@ Run modes
 Architecture
 ------------
   pipeline.py
-    ├── lineup_manager.py   ← Phase 1 (projected) + Phase 2 (confirmed polling)
-    ├── data_fetcher.py     ← Statcast + FanGraphs historical data
-    ├── feature_builder.py  ← feature engineering
-    └── config.py           ← constants
+    ├── lineup_manager.py    ← Phase 1 (projected) + Phase 2 (confirmed polling)
+    ├── statsapi_fetcher.py  ← counting/season/rolling stats (MLB StatsAPI)
+    ├── daily_snapshot.py    ← pitch-level "stuff" + batter discipline (Statcast snapshot)
+    ├── feature_builder.py   ← feature engineering
+    └── config.py            ← constants
+
+Data sources (no per-request scraping)
+--------------------------------------
+  * Pitcher rolling K + workload (k_rolling_*, days_rest, pitches_last) and
+    season stats (k_pct_season, bb_pct_season, k9_season, fip_season) come from
+    the MLB StatsAPI — fast, unauthenticated, reliable.
+  * Pitch-level "stuff" (whiff/csw/zone/o_swing/avg_velo per start) and batter
+    plate-discipline come from the once-daily league Statcast snapshot in object
+    storage (built by daily_snapshot.py).
+  * FanGraphs and per-pitcher Baseball Savant scraping have been removed.
 """
 
 import argparse
@@ -37,10 +48,11 @@ import pandas as pd
 
 from config import DATA_DIR, FEATURES_DIR, LOG_DIR, MODEL_DIR, ROLLING_WINDOWS
 from accuracy_tracker import AccuracyTracker
-from data_fetcher import HistoricalDataFetcher
+from daily_snapshot import load_latest_snapshot
 from feature_builder import FeatureBuilder
 from lineup_manager import LineupManager
 from model_trainer import FEATURE_COLS
+from statsapi_fetcher import StatsAPIFetcher
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -72,34 +84,70 @@ class DailyPipeline:
         self.target_date   = target_date or date.today()
         self.history_years = history_years
 
-        self.fetcher  = HistoricalDataFetcher()
+        self.statsapi = StatsAPIFetcher()
         self.lineup   = LineupManager(target_date=self.target_date)
         self.builder: Optional[FeatureBuilder] = None   # built after data load
 
-    # ── Step 1: Load historical data ───────────────────────────────────────
+        # Reference frames populated by load_reference_data()
+        self.pit_season:    pd.DataFrame = pd.DataFrame()
+        self.bat_season:    pd.DataFrame = pd.DataFrame()
+        self.snap_starts:   pd.DataFrame = pd.DataFrame()
+        self.snap_batters:  pd.DataFrame = pd.DataFrame()
 
-    def load_historical_data(self):
-        """Pull FanGraphs pitcher + batter stats for the lookback window."""
+    # ── Step 1: Load reference data (StatsAPI season + Statcast snapshot) ───
+
+    def load_reference_data(self):
+        """
+        Load the two reliable, scrape-free reference sources:
+
+          * StatsAPI bulk season stats (pitchers + batters) for the lookback
+            window — counting features with real BF/IP/HR.
+          * The latest league-wide Statcast snapshot from object storage —
+            per-start "stuff" metrics and batter plate-discipline.
+        """
         current_year = self.target_date.year
         start_year   = current_year - self.history_years
+        seasons      = list(range(start_year, current_year + 1))
 
-        logger.info(f"Loading FanGraphs data {start_year}–{current_year}")
-        self.fg_pitchers = self.fetcher.get_fangraphs_stats(start_year, current_year)
-        self.fg_batters  = self.fetcher.get_fangraphs_batter_stats(start_year, current_year)
-
+        logger.info(f"Loading StatsAPI season stats for {seasons}")
+        pit_frames = [self.statsapi.get_pitcher_season_stats(s) for s in seasons]
+        bat_frames = [self.statsapi.get_batter_season_stats(s)  for s in seasons]
+        self.pit_season = pd.concat([f for f in pit_frames if not f.empty],
+                                    ignore_index=True) if any(not f.empty for f in pit_frames) else pd.DataFrame()
+        self.bat_season = pd.concat([f for f in bat_frames if not f.empty],
+                                    ignore_index=True) if any(not f.empty for f in bat_frames) else pd.DataFrame()
         logger.info(
-            f"FanGraphs loaded: {len(self.fg_pitchers):,} pitcher-seasons, "
-            f"{len(self.fg_batters):,} batter-seasons"
+            f"StatsAPI season stats: {len(self.pit_season):,} pitcher-seasons, "
+            f"{len(self.bat_season):,} batter-seasons"
         )
 
-        # Statcast-derived batter stats — replaces FanGraphs when blocked (403).
-        # Reads from pre-computed cache in data/processed/; builds it on first run
-        # from the league-wide Statcast parquet (already on disk after training).
-        logger.info(f"Loading Statcast batter season stats {start_year}–{current_year}")
-        self.sc_batter_stats = self.fetcher.get_batter_season_stats_cache(
-            start_year, current_year
+        # Pitch-level snapshot (whiff/csw/zone/o_swing/avg_velo + batter stuff)
+        self.snap_starts, self.snap_batters = load_latest_snapshot()
+        if self.snap_starts.empty:
+            logger.warning(
+                "No Statcast snapshot found — pitcher 'stuff' features will be NaN. "
+                "Run daily_snapshot.py to populate."
+            )
+        logger.info(
+            f"Snapshot loaded: {len(self.snap_starts):,} pitcher-starts, "
+            f"{len(self.snap_batters):,} batter-seasons"
         )
-        logger.info(f"Statcast batter stats: {len(self.sc_batter_stats):,} batter-seasons")
+
+        # Batter feature frame: StatsAPI counting (k_pct, bb_pct) + snapshot
+        # plate-discipline stuff (o_swing/contact/swstr), merged on (batter, season).
+        self.sc_batter_stats = self._merge_batter_stats()
+
+    def _merge_batter_stats(self) -> pd.DataFrame:
+        """Left-join snapshot plate-discipline onto StatsAPI batter season stats."""
+        stuff_cols = ["batter", "season", "o_swing_pct", "contact_pct", "swstr_pct"]
+        if self.bat_season.empty:
+            # No StatsAPI batters — fall back to the snapshot's own counting stats
+            return self.snap_batters.copy()
+        merged = self.bat_season.copy()
+        if not self.snap_batters.empty:
+            stuff = self.snap_batters[[c for c in stuff_cols if c in self.snap_batters.columns]]
+            merged = merged.merge(stuff, on=["batter", "season"], how="left")
+        return merged
 
     # ── Step 2: Fetch today's schedule ────────────────────────────────────
 
@@ -151,62 +199,60 @@ class DailyPipeline:
                 f"{len(projected_away)} away + {len(projected_home)} home batters"
             )
 
-    # ── Step 4: Load pitcher Statcast histories ────────────────────────────
+    # ── Step 4: Build per-start frame (StatsAPI gamelog ⨝ snapshot stuff) ───
 
-    def load_pitcher_statcast(self, games: List[dict]):
+    def build_perstart_frame(self, games: List[dict]) -> pd.DataFrame:
         """
-        For each probable pitcher in today's games, fetch their Statcast
-        pitch history and compute both per-start metrics and season-level stats.
+        Assemble one row per (probable pitcher × prior start), combining:
 
-        Returns
-        -------
-        (statcast_starts, statcast_season) : tuple of DataFrames
-            statcast_starts  — one row per start (used for rolling features)
-            statcast_season  — one row per (pitcher, season) with k_pct_season,
-                               swstr_season, fip_season, etc.  Replaces FanGraphs.
+          * StatsAPI game log  — strikeouts, pitches, game_date, workload
+                                  (authoritative counting + the k_rolling source)
+          * Statcast snapshot  — whiff_pct, csw_pct, zone_pct, o_swing_pct,
+                                  avg_velo (pitch-level "stuff", joined on game_pk)
+
+        This replaces the old per-pitcher Baseball Savant scrape entirely:
+        no per-request Statcast calls, only reliable StatsAPI + the cached
+        league snapshot.
         """
-        all_starts  = []
-        all_pitches = []   # raw pitches — needed for season-level aggregation
-        seen_ids    = set()
+        current_year = self.target_date.year
+        seasons      = list(range(current_year - self.history_years, current_year + 1))
 
-        start_dt = (self.target_date - timedelta(days=365 * self.history_years)).strftime("%Y-%m-%d")
-        end_dt   = (self.target_date - timedelta(days=1)).strftime("%Y-%m-%d")
-
+        gamelogs = []
+        seen_ids = set()
         for game in games:
             for side in ["probable_pitcher_home", "probable_pitcher_away"]:
                 pp = game.get(side)
-                if not pp or pp.get("id") is None:
+                if not pp or pp.get("id") is None or pp["id"] in seen_ids:
                     continue
                 pid = pp["id"]
-                if pid in seen_ids:
-                    continue
                 seen_ids.add(pid)
+                gl = self.statsapi.get_pitcher_gamelog(pid, seasons)
+                if not gl.empty:
+                    gamelogs.append(gl)
 
-                logger.info(f"Loading Statcast for {pp['fullName']} (mlbam={pid})")
-                pitches = self.fetcher.get_statcast_pitcher(pid, start_dt, end_dt)
-                if pitches.empty:
-                    logger.warning(f"No Statcast data for {pp['fullName']}")
-                    continue
+        if not gamelogs:
+            logger.warning("No StatsAPI game logs assembled for today's pitchers")
+            return pd.DataFrame()
 
-                starts = self.fetcher.compute_per_start_metrics(pitches)
-                all_starts.append(starts)
-                all_pitches.append(pitches)   # keep raw for season aggregation
+        starts = pd.concat(gamelogs, ignore_index=True)
+        starts["game_date"] = pd.to_datetime(starts["game_date"])
 
-        if not all_starts:
-            logger.warning("No per-start Statcast data assembled")
-            return pd.DataFrame(), pd.DataFrame()
+        # Join pitch-level "stuff" from the snapshot on (pitcher, game_pk).
+        stuff_cols = ["whiff_pct", "csw_pct", "zone_pct", "o_swing_pct", "avg_velo"]
+        if not self.snap_starts.empty and "game_pk" in self.snap_starts.columns:
+            keep = ["pitcher", "game_pk"] + [c for c in stuff_cols if c in self.snap_starts.columns]
+            stuff = self.snap_starts[keep].drop_duplicates(["pitcher", "game_pk"])
+            starts = starts.merge(stuff, on=["pitcher", "game_pk"], how="left")
+        else:
+            for c in stuff_cols:
+                starts[c] = np.nan
 
-        combined_starts  = pd.concat(all_starts,  ignore_index=True)
-        combined_pitches = pd.concat(all_pitches, ignore_index=True)
-
+        matched = starts[stuff_cols].notna().any(axis=1).sum() if not starts.empty else 0
         logger.info(
-            f"Per-start data: {len(combined_starts):,} rows for {len(seen_ids)} pitchers"
+            f"Per-start frame: {len(starts):,} starts for {len(seen_ids)} pitchers "
+            f"({matched:,} with snapshot stuff)"
         )
-
-        # Compute season-level stats from raw pitches (replaces FanGraphs)
-        season_stats = self.fetcher.compute_pitcher_season_stats(combined_pitches)
-
-        return combined_starts, season_stats
+        return starts
 
     # ── Step 5: Assemble feature rows ─────────────────────────────────────
 
@@ -220,15 +266,16 @@ class DailyPipeline:
         Build one feature row per starting pitcher per game.
         Returns a DataFrame ready for model inference.
         """
-        if self.fg_pitchers is None or self.fg_batters is None:
-            raise RuntimeError("Call load_historical_data() first")
+        # FanGraphs is fully removed; pass empty frames so FeatureBuilder's
+        # FanGraphs fallback paths are inert and it relies on StatsAPI + snapshot.
+        empty_fg = pd.DataFrame()
 
         self.builder = FeatureBuilder(
-            fg_pitcher_df   = self.fg_pitchers,
-            fg_batter_df    = self.fg_batters,
+            fg_pitcher_df   = empty_fg,
+            fg_batter_df    = empty_fg,
             statcast_starts = statcast_starts,
-            statcast_season = statcast_season,
-            sc_batter_stats = getattr(self, "sc_batter_stats", None),
+            statcast_season = statcast_season if statcast_season is not None else self.pit_season,
+            sc_batter_stats = self.sc_batter_stats,
         )
 
         feature_rows = []
@@ -284,8 +331,8 @@ class DailyPipeline:
         """
         logger.info(f"=== Daily Pipeline Run: {self.target_date} ===")
 
-        # 1. Historical data
-        self.load_historical_data()
+        # 1. Reference data: StatsAPI season stats + Statcast snapshot
+        self.load_reference_data()
 
         # 2. Today's schedule
         games = self.fetch_schedule()
@@ -296,8 +343,9 @@ class DailyPipeline:
         # 3. Projected lineups
         self.build_projected_lineups(games)
 
-        # 4. Pitcher Statcast history + season-level stats
-        statcast_starts, statcast_season = self.load_pitcher_statcast(games)
+        # 4. Per-start frame: StatsAPI game logs joined with snapshot "stuff"
+        statcast_starts  = self.build_perstart_frame(games)
+        statcast_season  = self.pit_season
 
         # 5. Start polling for confirmed lineups
         if wait_for_lineups:

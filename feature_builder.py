@@ -370,7 +370,16 @@ class FeatureBuilder:
             weights.append(slot_w)
 
         def wmean(vals):
-            pairs = [(v, w) for v, w in zip(vals, weights) if not np.isnan(v)]
+            # pd.notna tolerates None / NaN / object-dtype missing values that
+            # arise when StatsAPI counting stats are merged with snapshot stuff
+            # (np.isnan would raise on a Python None). Coerce survivors to float.
+            pairs = []
+            for v, w in zip(vals, weights):
+                if pd.notna(v):
+                    try:
+                        pairs.append((float(v), w))
+                    except (TypeError, ValueError):
+                        continue
             if not pairs:
                 return np.nan
             vs, ws = zip(*pairs)

@@ -48,6 +48,20 @@ logger = logging.getLogger(__name__)
 FIP_CONSTANT = 3.17
 
 
+def _splits(data: dict) -> list:
+    """
+    Safely extract the 'splits' list from a StatsAPI stats response.
+
+    The payload shape is {"stats": [{"splits": [...]}]}, but 'stats' can come
+    back as an empty list (player/season with no data), so a bare [0] index
+    raises IndexError. This returns [] in every empty/malformed case.
+    """
+    stats = data.get("stats") or []
+    if not stats:
+        return []
+    return stats[0].get("splits", []) or []
+
+
 def _parse_ip(value) -> float:
     """
     Convert StatsAPI innings-pitched notation to decimal innings.
@@ -126,7 +140,7 @@ class StatsAPIFetcher:
             return pd.DataFrame()
 
         rows = []
-        for split in data.get("stats", [{}])[0].get("splits", []):
+        for split in _splits(data):
             pid = split.get("player", {}).get("id")
             st = split.get("stat", {})
             if pid is None:
@@ -197,7 +211,7 @@ class StatsAPIFetcher:
             return pd.DataFrame()
 
         rows = []
-        for split in data.get("stats", [{}])[0].get("splits", []):
+        for split in _splits(data):
             pid = split.get("player", {}).get("id")
             st = split.get("stat", {})
             if pid is None:
@@ -257,7 +271,7 @@ class StatsAPIFetcher:
                 logger.warning(f"gameLog fetch failed pid={pitcher_id} {season}: {exc}")
                 continue
 
-            for split in data.get("stats", [{}])[0].get("splits", []):
+            for split in _splits(data):
                 st = split.get("stat", {})
                 gm = split.get("game", {})
                 opp = split.get("opponent", {})
