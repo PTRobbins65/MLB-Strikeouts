@@ -28,8 +28,9 @@ import xgboost as xgb
 
 from config import FEATURES_DIR, LOG_DIR, MODEL_DIR, PROCESSED_DIR
 from data_fetcher import HistoricalDataFetcher
-from feature_builder import FeatureBuilder
+from feature_builder import FeatureBuilder, merge_batter_stuff
 from game_log_builder import GameLogBuilder
+from statsapi_fetcher import StatsAPIFetcher
 
 logger = logging.getLogger("model_trainer")
 
@@ -71,6 +72,7 @@ class ModelTrainer:
     def __init__(self, cv_folds: int = 5):
         self.cv_folds = cv_folds
         self.fetcher  = HistoricalDataFetcher()
+        self.statsapi = StatsAPIFetcher()
 
     # ── Feature matrix construction ────────────────────────────────────────
 
@@ -80,11 +82,15 @@ class ModelTrainer:
         start_year: int,
         end_year: int,
     ) -> pd.DataFrame:
-        """Load supporting data and run FeatureBuilder over the full game log."""
-        logger.info("Loading FanGraphs pitcher and batter stats...")
-        fg_pitchers = self.fetcher.get_fangraphs_stats(start_year, end_year)
-        fg_batters  = self.fetcher.get_fangraphs_batter_stats(start_year, end_year)
+        """Load supporting data and run FeatureBuilder over the full game log.
 
+        Feature sources mirror the daily inference pipeline EXACTLY so the model
+        never sees a train/serve skew:
+          * per-start "stuff" + workload  ← league Statcast (compute_per_start_metrics)
+          * pitcher season counting stats ← StatsAPI (k_pct/bb_pct/k9/fip)
+          * batter features              ← StatsAPI counting ⨝ snapshot stuff
+        FanGraphs is no longer used.
+        """
         start_dt = f"{start_year}-03-01"
         end_dt   = f"{end_year}-11-01"
         logger.info("Loading league-wide Statcast per-start metrics...")
@@ -93,26 +99,28 @@ class ModelTrainer:
             raise RuntimeError("No Statcast data available for the training window")
         statcast_starts  = self.fetcher.compute_per_start_metrics(pitches)
 
-        # Compute Statcast-derived pitcher and batter season stats from the same
-        # league-wide data (FanGraphs is blocked; these replace it cleanly).
-        logger.info("Computing Statcast pitcher season stats...")
-        statcast_season  = self.fetcher.compute_pitcher_season_stats(pitches)
-        logger.info("Computing Statcast batter season stats...")
-        sc_batter_stats  = self.fetcher.compute_batter_season_stats(pitches)
+        # Season-level counting stats come from StatsAPI (real BF/IP/HR), the
+        # same source the inference pipeline uses — not Statcast estimates.
+        seasons = list(range(start_year, end_year + 1))
+        logger.info(f"Loading StatsAPI pitcher season stats for {seasons}...")
+        pit_frames = [self.statsapi.get_pitcher_season_stats(s) for s in seasons]
+        statcast_season = pd.concat([f for f in pit_frames if not f.empty],
+                                    ignore_index=True) if any(not f.empty for f in pit_frames) else pd.DataFrame()
 
-        # Persist batter stats so the daily pipeline can load them without
-        # re-downloading or re-computing league-wide Statcast.
-        if not sc_batter_stats.empty:
-            batter_cache = PROCESSED_DIR / f"batter_season_{start_year}_{end_year}.parquet"
-            sc_batter_stats.to_parquet(batter_cache, index=False)
-            logger.info(
-                f"Batter season stats saved for pipeline use: "
-                f"{len(sc_batter_stats):,} batter-seasons -> {batter_cache.name}"
-            )
+        logger.info(f"Loading StatsAPI batter season stats for {seasons}...")
+        bat_frames = [self.statsapi.get_batter_season_stats(s) for s in seasons]
+        bat_season = pd.concat([f for f in bat_frames if not f.empty],
+                               ignore_index=True) if any(not f.empty for f in bat_frames) else pd.DataFrame()
+
+        # Statcast batter plate-discipline "stuff" (o_swing/contact/swstr),
+        # merged onto StatsAPI counting via the SAME helper inference uses.
+        logger.info("Computing Statcast batter plate-discipline (snapshot stuff)...")
+        snap_batters    = self.fetcher.compute_batter_season_stats(pitches)
+        sc_batter_stats = merge_batter_stuff(bat_season, snap_batters)
 
         builder = FeatureBuilder(
-            fg_pitcher_df   = fg_pitchers,
-            fg_batter_df    = fg_batters,
+            fg_pitcher_df   = pd.DataFrame(),
+            fg_batter_df    = pd.DataFrame(),
             statcast_starts = statcast_starts,
             statcast_season = statcast_season,
             sc_batter_stats = sc_batter_stats,

@@ -42,6 +42,29 @@ def _safe_int(val, default=0) -> int:
         return default
 
 
+def merge_batter_stuff(
+    statsapi_batter: pd.DataFrame,
+    snapshot_batter: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Combine StatsAPI batter counting stats (k_pct, bb_pct) with the Statcast
+    snapshot's plate-discipline "stuff" (o_swing_pct, contact_pct, swstr_pct),
+    joined on (batter, season).
+
+    Used IDENTICALLY by the training pipeline (model_trainer) and the daily
+    inference pipeline so the batter feature distribution can never drift
+    between the two. Returns the snapshot frame alone if StatsAPI is empty.
+    """
+    stuff_cols = ["batter", "season", "o_swing_pct", "contact_pct", "swstr_pct"]
+    if statsapi_batter is None or statsapi_batter.empty:
+        return snapshot_batter.copy() if snapshot_batter is not None else pd.DataFrame()
+    merged = statsapi_batter.copy()
+    if snapshot_batter is not None and not snapshot_batter.empty:
+        cols = [c for c in stuff_cols if c in snapshot_batter.columns]
+        merged = merged.merge(snapshot_batter[cols], on=["batter", "season"], how="left")
+    return merged
+
+
 # Lazy import: IdMapper may not be built on first run
 try:
     from id_mapper import IdMapper as _IdMapper

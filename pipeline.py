@@ -49,7 +49,7 @@ import pandas as pd
 from config import DATA_DIR, FEATURES_DIR, LOG_DIR, MODEL_DIR, ROLLING_WINDOWS
 from accuracy_tracker import AccuracyTracker
 from daily_snapshot import load_latest_snapshot
-from feature_builder import FeatureBuilder
+from feature_builder import FeatureBuilder, merge_batter_stuff
 from lineup_manager import LineupManager
 from model_trainer import FEATURE_COLS
 from statsapi_fetcher import StatsAPIFetcher
@@ -138,16 +138,12 @@ class DailyPipeline:
         self.sc_batter_stats = self._merge_batter_stats()
 
     def _merge_batter_stats(self) -> pd.DataFrame:
-        """Left-join snapshot plate-discipline onto StatsAPI batter season stats."""
-        stuff_cols = ["batter", "season", "o_swing_pct", "contact_pct", "swstr_pct"]
-        if self.bat_season.empty:
-            # No StatsAPI batters — fall back to the snapshot's own counting stats
-            return self.snap_batters.copy()
-        merged = self.bat_season.copy()
-        if not self.snap_batters.empty:
-            stuff = self.snap_batters[[c for c in stuff_cols if c in self.snap_batters.columns]]
-            merged = merged.merge(stuff, on=["batter", "season"], how="left")
-        return merged
+        """Left-join snapshot plate-discipline onto StatsAPI batter season stats.
+
+        Delegates to feature_builder.merge_batter_stuff so training and
+        inference share one definition (no feature skew).
+        """
+        return merge_batter_stuff(self.bat_season, self.snap_batters)
 
     # ── Step 2: Fetch today's schedule ────────────────────────────────────
 
