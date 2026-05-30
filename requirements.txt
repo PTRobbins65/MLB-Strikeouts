@@ -10,8 +10,12 @@ numpy==1.26.4
 pyarrow==14.0.2             # Parquet I/O (fast cache)
 
 # Model
+# NOTE: xgboost MUST match the version the committed model was trained/saved with.
+# A model saved by xgboost 3.x and loaded by 2.0.3 silently mis-predicts (the
+# JSON base_score/schema handling changed), so this pin is load-bearing — bump it
+# in lockstep whenever you retrain on a newer xgboost.
 scikit-learn==1.4.2
-xgboost==2.0.3
+xgboost==3.2.0
 joblib==1.3.2               # model serialization (Poisson GLM)
 
 # API server
