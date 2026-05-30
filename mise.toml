@@ -1,0 +1,10 @@
+# Build-tool config for Railway (which provisions Python via `mise`).
+#
+# A mise release from 2026-05-28 began requiring GitHub artifact attestations
+# for the pinned CPython build (python@3.11.9, an older prebuilt that predates
+# attestations), which aborts the Railway build with:
+#   "No GitHub artifact attestations found for python@3.11.9"
+# Disabling the check restores the previous (working) install behavior. The
+# Python version itself is unchanged (still pinned via runtime.txt).
+[settings]
+python.github_attestations = false
