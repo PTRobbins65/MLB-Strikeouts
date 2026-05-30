@@ -34,6 +34,7 @@ Interface
 import io
 import logging
 import os
+import sys
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import List, Optional
@@ -59,6 +60,9 @@ class Storage(ABC):
 
     @abstractmethod
     def list_keys(self, prefix: str) -> List[str]: ...
+
+    @abstractmethod
+    def delete(self, key: str) -> None: ...
 
     def latest(self, prefix: str) -> Optional[str]:
         """Return the lexicographically-greatest key under `prefix`, or None.
@@ -109,6 +113,11 @@ class LocalStorage(Storage):
             if p.is_file() and p.name.startswith(stem):
                 out.append(str(p.relative_to(self.root)).replace("\\", "/"))
         return out
+
+    def delete(self, key: str) -> None:
+        path = self._path(key)
+        if path.exists():
+            path.unlink()
 
 
 # ── S3-compatible backend (R2 / S3 / B2) ─────────────────────────────────────
@@ -170,6 +179,9 @@ class S3Storage(Storage):
                 keys.append(obj["Key"])
         return keys
 
+    def delete(self, key: str) -> None:
+        self.client.delete_object(Bucket=self.bucket, Key=key)
+
 
 # ── Factory ──────────────────────────────────────────────────────────────────
 
@@ -199,18 +211,47 @@ def get_storage() -> Storage:
     return _INSTANCE
 
 
-# ── Smoke test ───────────────────────────────────────────────────────────────
+# ── Smoke test / connectivity verifier ───────────────────────────────────────
+#
+# Run `python storage.py` to verify the configured backend works end-to-end.
+# With STORAGE_BACKEND=s3 (+ S3_* vars, e.g. from a local .env) this proves R2
+# connectivity, auth, and full put/list/latest/get/delete — then cleans up.
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     s = get_storage()
+    backend = type(s).__name__
+    print(f"\nVerifying storage backend: {backend}")
+
     df = pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]})
+    k1 = "_healthcheck/roundtrip_a.parquet"
+    k2 = "_healthcheck/roundtrip_b.parquet"
+    ok = True
+    try:
+        s.put_parquet(df, k1)
+        s.put_parquet(df, k2)
 
-    s.put_parquet(df, "snapshots/snapshot_20260529.parquet")
-    s.put_parquet(df, "snapshots/snapshot_20260530.parquet")
+        exists  = s.exists(k2)
+        latest  = s.latest("_healthcheck/roundtrip_")
+        got     = s.get_parquet(k2)
+        missing = s.get_parquet("_healthcheck/does_not_exist.parquet")
 
-    print("exists:", s.exists("snapshots/snapshot_20260530.parquet"))
-    print("latest:", s.latest("snapshots/snapshot_"))
-    got = s.get_parquet("snapshots/snapshot_20260530.parquet")
-    print("round-trip rows:", 0 if got is None else len(got))
-    print("missing returns None:", s.get_parquet("snapshots/nope.parquet") is None)
+        checks = {
+            "put+exists":         exists is True,
+            "list/latest newest": latest == k2,
+            "round-trip rows==3": got is not None and len(got) == 3,
+            "missing -> None":    missing is None,
+        }
+        for name, passed in checks.items():
+            print(f"  [{'PASS' if passed else 'FAIL'}] {name}")
+            ok = ok and passed
+    finally:
+        # Always clean up the healthcheck objects
+        for k in (k1, k2):
+            try:
+                s.delete(k)
+            except Exception as exc:
+                print(f"  (cleanup of {k} failed: {exc})")
+
+    print(f"\n{'ALL CHECKS PASSED' if ok else 'SOME CHECKS FAILED'} — backend: {backend}")
+    sys.exit(0 if ok else 1)

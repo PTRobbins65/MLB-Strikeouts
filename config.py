@@ -3,7 +3,30 @@ MLB Strikeout Prediction Pipeline — Configuration
 All constants, paths, and data source settings live here.
 """
 
+import os
 from pathlib import Path
+
+# ── Local .env loading (zero-dependency) ──────────────────────────────────────
+# Loads KEY=VALUE pairs from a local .env into the process environment for dev
+# convenience (e.g. STORAGE_BACKEND / S3_* credentials). Existing environment
+# variables always win, so Railway's injected vars are never overridden.
+def _load_dotenv(path: Path) -> None:
+    if not path.exists():
+        return
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key, val = key.strip(), val.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+    except Exception:
+        pass  # never let a malformed .env break imports
+
+
+_load_dotenv(Path(__file__).parent / ".env")
 
 # ── Project Paths ─────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).parent
